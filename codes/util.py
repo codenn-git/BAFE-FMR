@@ -1,4 +1,5 @@
 import rasterio
+from rasterio.plot import show
 from rasterio.mask import mask
 import geopandas as gpd
 import shapely
@@ -6,6 +7,8 @@ import skimage
 import matplotlib.pyplot as plt
 import numpy as np
 import os
+import math
+import mpl_interactions
 import cv2
 
 class Preprocessing:
@@ -26,7 +29,7 @@ class Preprocessing:
         if self.pneo:
             with rasterio.open(self.raster_path) as src:
                 with rasterio.vrt.WarpedVRT(src, crs=target_crs, resampling=resampling) as vrt:
-                    self._rep_data = vrt.read([1,2,3])
+                    self._rep_data = vrt.read([1,2,3,4])
                     self._rep_trans = vrt.transform
                     self._rep_crs = vrt.crs
         else:
@@ -38,15 +41,32 @@ class Preprocessing:
 
         return self._rep_data, self._rep_trans, self._rep_crs
 
-    def clipraster(self, raster_data=None, transform=None, buffer_dist = 15, bbox = False):
+    def clipraster(self, raster_data=None, vector_data=None, transform=None, buffer_dist = 15, bbox = False):
+        '''Clip the raster data using input vector data. If no vector data is provided, output will be the whole image (reprojected image)
+            Args:
+                raster_data: Raster data to be clipped
+                vector_data: GDF, Vector data to clip the raster
+                transform: Transform of the raster data
+                buffer_dist: Buffer distance for the vector data
+                bbox: If True, use bounding box for clipping'''
         
-        if raster_data is None:
-            if self._rep_trans is None:
+        if raster_data is None or transform is None:
+            if self._rep_data is None or self._rep_trans is None:
                 raise ValueError("Reproject has not been performed. Call reproject() first.")
             else:
                 raster_data = self._rep_data
+                transform = self._rep_trans
 
-        centerline = gpd.read_file(self.vector_path).to_crs(self.crs)
+        if vector_data is None:
+            if self.vector_path is None: #if vector data is not provided, not cropped image will be returned
+                self._clipped_data = self._rep_data
+                self._clipped_transform = self._rep_trans
+
+                return self._clipped_data, self._clipped_transform
+            else:
+                centerline = gpd.read_file(self.vector_path).to_crs(self.crs)
+        else:
+            centerline = vector_data.to_crs(self.crs)
 
         buffered_lines = []
         for geometry in centerline.geometry:
@@ -68,12 +88,6 @@ class Preprocessing:
             clipping_gdf = buffered_lines_gdf
 
         clipping_geom = [geom.__geo_interface__ for geom in clipping_gdf.geometry]
-
-        if transform is None:
-            if self._rep_trans is None:
-                raise ValueError("Reproject has not been performed. Call reproject() first.")
-            else:
-                transform = self._rep_trans #if transform not specified, use reprojected transform
 
         # Perform masking
         count = raster_data.shape[0] if len(raster_data.shape) == 3 else 1
@@ -103,15 +117,21 @@ class Preprocessing:
         return self._clipped_data, self._clipped_transform
     
     def display(self):
+        vector = self.vector_data
+
+        fig, ax = plt.subplots(figsize=(10, 10))
+
         if self._clipped_data is None:
             raise ValueError("Clipped data has not been generated. Call 'clipraster()' first.")
         else:
             data = self._clipped_data
             
-        data = np.moveaxis(data, 0, -1)
-        
-        plt.imshow(data)
-        plt.title(f"Clipped Image")
+        show(data, ax=ax, transform=self._clipped_transform)
+        vector.plot(ax=ax, color='red', edgecolor=None, linewidth=1)
+        vector.plot(ax=ax, color='red', edgecolor=None, linewidth=1, label='FMR')
+        ax.legend(loc='upper right')
+
+        plt.title(f"Check whether the FMR vector is aligned with the image.")
         plt.axis('off')
         plt.show()
 
@@ -205,9 +225,15 @@ class Filters:
 
         return self._enhanced_stretched
     
+    def cielab(self):
+        raster_data = np.moveaxis(self.raster_data[:3, :, :], 0, -1)  # Convert to HWC format
+        lab = skimage.color.rgb2lab(raster_data)
+
+        return lab
+    
 class Morph:
-    def __init__(self, raster_data):
-        self.raster_data = raster_data
+    def __init__(self):
+        self.raster_data = None
 
         self._normalized = None
         self._edges = None
@@ -215,12 +241,17 @@ class Morph:
         self._merged = None
         self._morphed = None
         self._normalized_gray = None
-    
+
     def normalize_band(self, band):
         return (band - band.min()) / (band.max() - band.min())
 
     # Normalize all bands
     def normalize_raster(self):
+        if self.raster_data.shape[0] > 3:
+            self.raster_data = self.raster_data[3:] # Use only the first 3 bands for RGB
+        else:
+            self.raster_data = self.raster_data
+
         self._normalized = (self.raster_data - self.raster_data.min()) / (self.raster_data.max() - self.raster_data.min())
         
         if self._normalized.shape[0] == 3:  # For RGB
@@ -244,26 +275,51 @@ class Morph:
         else:
             raise ValueError("Edge detection or thresholding has not been performed yet.")
 
-    def morphology(self, a=5, b=3):
+    def morphology(self, a=5, b=3, ite1=3, ite2=7):
         thresholded = self._thresholded.astype(np.uint8)
 
         kernel_a = np.ones((a, a), np.uint8)
-        canny_dilated = cv2.dilate(self._edges.astype(np.uint8), kernel_a, iterations=3)
+        canny_dilated = cv2.dilate(self._edges.astype(np.uint8), kernel_a, iterations=ite1)
 
         kernel_b = np.ones((b,b), np.uint8)
-        canny_eroded = cv2.erode(canny_dilated, kernel_b, iterations=7).astype(np.uint8)
+        canny_eroded = cv2.erode(canny_dilated, kernel_b, iterations=ite2).astype(np.uint8)
 
         ##Merged_0: Merged (T+(T>D>E))
         self._morphed = np.logical_and(thresholded, canny_eroded) 
 
-    def process(self):
+    def remove_small_islands(self, raster_data, min_size=100):
+        # Label connected regions
+        labels = skimage.measure.label(raster_data, connectivity=2)
+        
+        # Remove small islands
+        cleaned = skimage.morphology.remove_small_objects(labels, min_size=min_size)
+
+        return (cleaned > 0).astype(np.uint8)
+        
+
+    def process(self, raster_data, a=5, b=3, ite1=3, ite2=7):
+        self.raster_data = raster_data
+
         self.normalize_raster()
         self.detect_edge()
         self.threshold_raster()
-        self.morphology()
-
-        # return self._merged
+        self.morphology(a=a,b=b,ite1=ite1,ite2=ite2)
         
+        return self._morphed
+
+    def threshold_cielab(self):
+        lab = self.raster_data
+        lab_normalized = skimage.exposure.rescale_intensity(lab, in_range=(lab.min(), lab.max()), out_range=(0, 1))
+
+        # Get the Otsu threshold
+        otsu_threshold = skimage.filters.threshold_otsu(lab_normalized[..., 0])  # Use the L* channel for thresholding
+
+        # Apply the threshold to create a binary image
+        binary_image = lab_normalized[..., 0] > otsu_threshold
+        self._thresholded = binary_image
+
+        return binary_image
+
     def display(self, data_type="morphed"):
         if data_type == "normalized":
             if self._normalized is None:
@@ -393,14 +449,13 @@ class MeasureWidth:
         self.raster_data = raster_data
         self.transform = raster_transform
         self.crs = raster_crs
-        self.centerline = gpd.read_file(centerline_path)
+        self.centerline = gpd.read_file(centerline_path).to_crs(self.crs)
         self.vectorized_roads = None
         self._transects = None
         self.clipped_transects = None
         
-    def create_transects(self, transect_length=10, interval=10):
+    def create_transects(self, transect_length=5, interval=3):
         """Create transects perpendicular to a centerline at regular intervals."""
-        self.centerline = self.centerline.to_crs(self.crs)
         self.centerline = self.centerline.geometry[0]
         
         transects = []
@@ -416,8 +471,8 @@ class MeasureWidth:
             normal = np.array([-normal[1], normal[0]])  # Rotate 90 degrees to get normal vector
             normal = normal / np.linalg.norm(normal) # Normalize the vector
             
-            transect_start = point_coords + normal * -transect_length  # Extend 10 meters on one side
-            transect_end = point_coords + normal * transect_length  # Extend 10 meters on the other side
+            transect_start = point_coords + normal * -transect_length
+            transect_end = point_coords + normal * transect_length
 
             transects.append(shapely.geometry.LineString([transect_start, transect_end]))
 
@@ -433,7 +488,7 @@ class MeasureWidth:
             return None  # No roads to vectorize
 
         # Vectorize the road mask using rasterio.features.shapes
-        shapes_generator = rasterio.features.shapes(self.raster_data, mask=road_mask, transform=self.transform)
+        shapes_generator = rasterio.features.shapes(self.raster_data.astype(np.uint8), mask=road_mask, transform=self.transform)
     
         # Create GeoDataFrame from vectorized shapes
         if tolerance is None:
@@ -463,17 +518,9 @@ class MeasureWidth:
 
         # Clip transects with the vectorized roads
         clipped = gpd.overlay(self._transects, self.vectorized_roads, how='intersection')
+        clipped = clipped.explode(index_parts=True)
+        clipped = clipped.explode(index_parts=True)
 
-        self.clipped_transects = clipped
-
-    def clip_transects(self):
-        """Clip transects using the vectorized roads and save the result."""
-        if self.vectorized_roads is None:
-            raise ValueError("Roads not vectorized. Run vectorize_roads() first.")
-
-        # Clip transects with the vectorized roads
-        clipped = gpd.overlay(self._transects, self.vectorized_roads, how='intersection')
-        
         self.clipped_transects = clipped
         self.clipped_transects['width'] = clipped.geometry.length
 
@@ -483,17 +530,38 @@ class MeasureWidth:
         if self.clipped_transects is None:
             raise ValueError("Transects not measured. Run clip_transects() first.")
 
-        if self.clipped_transects["width"].mean() < 4:
-            self.clipped_transects = self.clipped_transects[(self.clipped_transects["width"] >= 3) & (self.clipped_transects["width"] <= 5)]
+        if self.clipped_transects["width"].mean() < 5 and self.clipped_transects["width"].mean() > 3.8:
+            self.clipped_transects = self.clipped_transects[(self.clipped_transects["width"] >= 3.7) & (self.clipped_transects["width"] <= 5.3)]
         else:                                                    
             self.clipped_transects = self.clipped_transects[(self.clipped_transects["width"] >= 4) & (self.clipped_transects["width"] <= 8)]
 
-    def process(self, tolerance=None, resolution=None):
-        self.create_transects()
-        self.vectorize_roads(tolerance=tolerance, resolution=resolution)
+    def process(self, int, tol, res):
+        self.create_transects(interval=int)
+        self.vectorize_roads(tolerance=tol, resolution=res)
         self.clip_transects()
         self.filter_transects()
         return self.clipped_transects[['geometry', 'width']]
+
+    def generate_polygon(self):
+        transects = self.clipped_transects['geometry']
+        # Extract the endpoints of the transects
+        left_points = [transect.coords[0] for transect in transects]  # Start points
+        right_points = [transect.coords[1] for transect in transects]  # End points
+
+        # Create LineStrings by connecting the endpoints
+        left_line = shapely.geometry.LineString(left_points)  # Line along the left side
+        right_line = shapely.geometry.LineString(right_points)  # Line along the right side
+
+        # Create a Polygon by combining the left and right lines
+        polygon = shapely.geometry.Polygon(left_points + right_points[::-1])  # Reverse right points to close the polygon
+
+        gdf_polygon = gpd.GeoDataFrame({
+            'id': [1],  # Unique ID for the polygon
+            'geometry': [polygon],
+            'description': ['Polygon']  # Optional: Add description
+        })
+
+        return gdf_polygon
 
     def export(self, output_path, gdf=None):
          # Ensure the output folder exists
@@ -545,3 +613,113 @@ def export(raster, transform, output_path, crs="EPSG: 32651"):
             
     basename = os.path.basename(output_path)
     return print(f"Successfully saved {basename} to {output_path}")
+
+class Interaction:
+    def __init__(self, img, vector_path):
+        self.vector_data = gpd.read_file(vector_path).to_crs("EPSG:32651")
+        self.img_orig = np.moveaxis(img, 0, -1)  # Move the first axis to the last position
+        self.line_points = []
+        self.press_event = {'x': None, 'y': None}
+        self.drag_threshold = 5
+
+        self.fig, self.ax = plt.subplots(figsize=(10, 8))
+        self.ax.imshow(self.img_orig)
+        self.ax.set_title("Left-click to draw, Right-click to undo, Middle-click to reset, Enter to finish.")
+        self.ax.axis("off")
+
+        self.bind_events()
+
+    def bind_events(self):
+        self.fig.canvas.mpl_connect('button_press_event', self.onpress)
+        self.fig.canvas.mpl_connect('button_release_event', self.onrelease)
+        self.fig.canvas.mpl_connect('key_press_event', self.onkey)
+
+        mpl_interactions.zoom_factory(self.ax)
+        mpl_interactions.panhandler(self.fig)
+
+    def redraw(self):
+        xlim = self.ax.get_xlim()
+        ylim = self.ax.get_ylim()  
+
+        self.ax.clear()
+        self.ax.imshow(self.img_orig)
+        self.ax.set_title("Left-click to draw, Right-click to undo, Middle-click to reset, Enter to finish.")
+        self.ax.axis("off")
+
+        if self.line_points:
+            x_vals, y_vals = zip(*self.line_points)
+            self.ax.plot(x_vals, y_vals, 'g-', linewidth=2)
+            self.ax.plot(x_vals, y_vals, 'ro', markersize=4)
+
+        self.ax.set_xlim(xlim)
+        self.ax.set_ylim(ylim)
+
+        self.fig.canvas.draw()
+
+    def onpress(self, event):
+        if event.button == 1 and event.inaxes:
+            self.press_event['x'] = event.x
+            self.press_event['y'] = event.y
+
+    def onrelease(self, event):
+        if not event.inaxes:
+            return
+
+        if event.button == 1:
+            dx = abs(event.x - self.press_event['x'])
+            dy = abs(event.y - self.press_event['y'])
+            if dx < self.drag_threshold and dy < self.drag_threshold:
+                # Treat as a left-click
+                x, y = event.xdata, event.ydata
+                self.line_points.append((x, y))
+                self.redraw()
+
+        elif event.button == 3:
+            # Right-click: delete last point
+            if self.line_points:
+                self.line_points.pop()
+                self.redraw()
+
+        elif event.button == 2:
+            # Middle-click: reset all
+            self.line_points.clear()
+            self.redraw()
+
+    def onkey(self, event):
+        if event.key == 'enter' and len(self.line_points) >= 2:
+            x_vals, y_vals = zip(*self.line_points)
+            total_length = sum(math.hypot(x1 - x0, y1 - y0)
+                            for (x0, y0), (x1, y1) in zip(self.line_points[:-1], self.line_points[1:]))
+            
+            vector_length = self.vector_data.length.sum()
+            
+            mid_x = sum(x_vals) / len(x_vals)
+            mid_y = sum(y_vals) / len(y_vals)
+            self.ax.text(mid_x, mid_y, f"Length: {total_length:.2f} meters",
+                    color='blue', fontsize=12, bbox=dict(facecolor='white', alpha=0.7))
+            
+            progress = (total_length / vector_length) * 100
+            print(f"Progress: {progress:.2f}%")
+
+            self.ax.legend([f"FMR progress: {progress:.2f}%"], loc='lower center', fontsize=12, frameon=True)
+
+            self.fig.canvas.draw()
+
+        elif event.key == 'backspace':
+            if self.line_points:
+                self.line_points.pop()
+                self.redraw()
+
+    def show(self):
+        plt.show()
+
+    def export_line(self, output_path):
+        if not self.line_points:
+            raise ValueError("No line points to save.")
+        
+        line_geom = [shapely.geometry.LineString(self.line_points)]
+        gdf = gpd.GeoDataFrame(geometry=line_geom, crs="EPSG:32651")
+        
+        # Save to file
+        gdf.to_file(output_path, driver='ESRI Shapefile')
+        print(f"Line saved to {output_path}")
