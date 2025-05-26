@@ -65,6 +65,7 @@ class Preprocessing:
                 return self._clipped_data, self._clipped_transform
             else:
                 centerline = gpd.read_file(self.vector_path).to_crs(self.crs)
+                self.vector_data = centerline
         else:
             centerline = vector_data.to_crs(self.crs)
 
@@ -591,6 +592,14 @@ class MeasureWidth:
             raise ValueError("Transects not measured. Run process() first.")
         
         return self.clipped_transects
+    
+    def display(self, raster, ax):
+        show(raster, ax=ax, transform=self.transform)
+        self.clipped_transects.plot(ax=ax, color='red', edgecolor=None, linewidth=1)
+        ax.set_title("Generated Transects")
+        ax.axis("off")
+        
+        return plt.show()
     
 def export(raster, transform, output_path, crs="EPSG: 32651"):
     # Ensure output folder exists
