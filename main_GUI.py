@@ -4,8 +4,6 @@ import re
 import shutil
 import threading
 import tempfile
-from datetime import datetime
-
 import pandas as pd
 import geopandas as gpd
 import folium
@@ -13,6 +11,8 @@ import rasterio
 from shapely.geometry import box
 from shapely.ops import transform as shapely_transform
 from pyproj import Transformer
+from datetime import datetime
+
 from PyQt5.QtWidgets import QApplication, QMainWindow, QVBoxLayout, QWidget
 from PyQt5.QtWebEngineWidgets import QWebEngineView
 from PyQt5.QtCore import QUrl
@@ -25,10 +25,9 @@ from waitress import serve
 # ==========================================================
 shapefile_path = r"C:\Users\user-307E123400\OneDrive - Philippine Space Agency\FMR\.for GUI\Master FMR\master-fmr.shp"
 bsg_folder = r"C:\Users\user-307E123400\OneDrive - Philippine Space Agency\SDMAD_SHARED\PROJECTS\SAKA\FMR\GUI\BSG images"
-fmr_db_file = os.path.join(os.path.dirname(shapefile_path), "fmr_database.csv")
 
 # ==========================================================
-# Flask and GeoData
+# Flask Setup
 # ==========================================================
 app = Flask(__name__)
 CORS(app)
@@ -39,55 +38,28 @@ gdf = gpd.read_file(shapefile_path).to_crs(epsg=4326)
 filtered_gdf = gdf.copy()
 
 
-def updateFMRs(master_path):
-    master_dir = os.path.dirname(master_path)
-    master_name = os.path.splitext(os.path.basename(master_path))[0]
+def getDatabase():
+    """Scan FMR and BSG images, extracting match information and save results to 'fmr_database.csv'."""
+    import re
+    import rasterio
+    import pandas as pd
+    import geopandas as gpd
+    from shapely.geometry import box
+    from shapely.ops import transform as shapely_transform
+    from pyproj import Transformer
+    from datetime import datetime
 
-    master_gdf = gpd.read_file(master_path)
-    master_crs = master_gdf.crs
-    gdfs_to_merge = []
-    for file in os.listdir(master_dir):
-        if file.endswith('.shp'):
-            base_name = os.path.splitext(file)[0]
-            if base_name != master_name:
-                file_path = os.path.join(master_dir, file)
-                try:
-                    gdf_temp = gpd.read_file(file_path, encoding='latin1')
-                    if gdf_temp.crs != master_crs:
-                        gdf_temp = gdf_temp.to_crs(master_crs)
-                    gdfs_to_merge.append(gdf_temp)
-                except Exception as e:
-                    print(f"Could not read {file_path}: {e}")
+    master_fmr = shapefile_path
+    bsg_folder_path = bsg_folder
+    fmr_db_file = os.path.join(os.path.dirname(master_fmr), "fmr_database.csv")
 
-    if not gdfs_to_merge:
-        print("No additional FMR shapefiles found to merge.")
-        return False
+    # Read and reproject FMR
+    fmr_gdf = gpd.read_file(master_fmr).to_crs("EPSG:32651")  
 
-    merged_gdf = pd.concat([master_gdf] + gdfs_to_merge, ignore_index=True)
-    merged_gdf.to_file(master_path)
+    # List .tif files
+    tif_files = [f for f in os.listdir(bsg_folder_path) if f.lower().endswith(".tif")]
 
-    merged_folder = os.path.join(master_dir, "merged")
-    os.makedirs(merged_folder, exist_ok=True)
-
-    for file in os.listdir(master_dir):
-        base_name, ext = os.path.splitext(file)
-        if base_name != master_name and ext.lower() in ['.shp', '.shx', '.dbf', '.prj', '.cpg', '.qix']:
-            full_file = os.path.join(master_dir, file)
-            if os.path.isfile(full_file):
-                shutil.move(full_file, os.path.join(merged_folder, file))
-
-    return True
-
-
-def updateFMRDatabase():
-    """Update FMR database based on available FMRs and matching BSG images."""
-    # Load FMR
-    fmr_gdf = gpd.read_file(shapefile_path).to_crs("EPSG:32651")  
-
-    # List all .tif files
-    tif_files = [f for f in os.listdir(bsg_folder) if f.lower().endswith(".tif")]
-
-    # Transformer for FMR -> Raster CRS
+    # Transformer
     fmr_transformer = Transformer.from_crs("EPSG:32651", "EPSG:4326", always_xy=True)
 
     results = []
@@ -97,10 +69,12 @@ def updateFMRDatabase():
         planned_length = fmr_geom.length
         matched_images = []
         for tif_file in tif_files:
-            tif_path = os.path.join(bsg_folder, tif_file)
+            tif_path = os.path.join(bsg_folder_path, tif_file)
+
             with rasterio.open(tif_path) as src:
                 raster_bounds = box(*src.bounds)
 
+            # Reproject FMR geometry to raster CRS
             fmr_geom_in_raster_crs = shapely_transform(fmr_transformer.transform, fmr_geom)
 
             if fmr_geom_in_raster_crs.intersects(raster_bounds):
@@ -155,6 +129,44 @@ def updateFMRDatabase():
     print(f"✅ Done! FMR database saved to:\n{fmr_db_file}")
 
 
+def updateFMRs(master_path):
+    """Merge other FMR shapefiles into the master FMR shapefile."""
+    master_dir = os.path.dirname(master_path)
+    master_name = os.path.splitext(os.path.basename(master_path))[0]
+
+    master_gdf = gpd.read_file(master_path)
+    master_crs = master_gdf.crs
+    gdfs_to_merge = []
+    for file in os.listdir(master_dir):
+        if file.endswith('.shp'):
+            base_name = os.path.splitext(file)[0]
+            if base_name != master_name:
+                file_path = os.path.join(master_dir, file)
+                try:
+                    gdf = gpd.read_file(file_path)
+                    if gdf.crs != master_crs:
+                        gdf = gdf.to_crs(master_crs)
+                    gdfs_to_merge.append(gdf)
+                except Exception as e:
+                    print(f"Could not read {file_path}: {e}")
+
+    if gdfs_to_merge:
+        merged_gdf = pd.concat([master_gdf] + gdfs_to_merge, ignore_index=True)
+        merged_gdf.to_file(master_path)
+    else:
+        merged_gdf = master_gdf
+
+    merged_folder = os.path.join(master_dir, "merged")
+    os.makedirs(merged_folder, exist_ok=True)
+
+    for file in os.listdir(master_dir):
+        base_name, ext = os.path.splitext(file)
+        if base_name != master_name and ext.lower() in ['.shp', '.shx', '.dbf', '.prj', '.cpg', '.qix']:
+            full_file = os.path.join(master_dir, file)
+            if os.path.isfile(full_file):
+                shutil.move(full_file, os.path.join(merged_folder, file))
+
+
 @app.route('/')
 def serve_map():
     return send_file("fmr_interactive_map.html")
@@ -186,25 +198,20 @@ def filter_by_province():
             filtered_gdf = gdf.copy()
         else:
             filtered_gdf = gdf[gdf["PROV_NAME"].str.lower() == province.lower()].copy()
-        create_fmr_map(filtered_gdf, pan_to=filtered_gdf)
+        create_fmr_map(filtered_gdf)
         return jsonify({"status": "filtered", "count": len(filtered_gdf)})
 
 
-@app.route('/merge', methods=['POST'])
-def merge_fmrs():
+@app.route('/update_fmr', methods=['POST'])
+def update_fmr_route():
     try:
-        result = updateFMRs(shapefile_path)
-        if not result:
-            return jsonify({"status": "info", "message": "No additional FMRs found to merge."})
+        updateFMRs(shapefile_path)
+        getDatabase()
         global gdf, filtered_gdf
         gdf = gpd.read_file(shapefile_path).to_crs(epsg=4326)
         filtered_gdf = gdf.copy()
         create_fmr_map(gdf)
-
-        # ✅ New call
-        updateFMRDatabase()
-
-        return jsonify({"status": "success", "message": "FMR list updated and database refreshed successfully"})
+        return jsonify({"status": "success", "message": "FMR updated successfully"})
     except Exception as e:
         return jsonify({"status": "error", "message": str(e)}), 500
 
@@ -218,7 +225,6 @@ def export_selected():
         selected_gdf = gdf.loc[selected_features]
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         tempdir = tempfile.gettempdir()
-
         if fmt == "shp":
             export_path = os.path.join(tempdir, f"selected_fmrs_{timestamp}.shp")
             selected_gdf.to_file(export_path)
@@ -228,15 +234,16 @@ def export_selected():
         else:
             export_path = os.path.join(tempdir, f"selected_fmrs_{timestamp}.geojson")
             selected_gdf.to_file(export_path, driver="GeoJSON")
-
         return send_file(export_path, as_attachment=True)
 
 
 def run_flask():
+    """Run the Flask app using Waitress."""
     serve(app, host="127.0.0.1", port=5000)
 
 
-def create_fmr_map(input_gdf=None, pan_to=None):
+def create_fmr_map(input_gdf=None):
+    """Create an interactive FMR map and save as 'fmr_interactive_map.html'."""
     map_gdf = input_gdf if input_gdf is not None else gdf
     if map_gdf.empty:
         print("Shapefile is empty!")
@@ -245,9 +252,7 @@ def create_fmr_map(input_gdf=None, pan_to=None):
     center = map_gdf.union_all().centroid
     fmap = folium.Map(location=[center.y, center.x], zoom_start=10, tiles="Esri.WorldImagery")
 
-    provinces = sorted(set(p.title() for p in gdf["PROV_NAME"].dropna()))
-    province_options = "".join([f"<option value='{p}'>{p}</option>" for p in provinces])
-
+    geo_layer_var_lines = []
     for idx, row in map_gdf.iterrows():
         layer_name = f"geoLayer_{idx}"
         brgy = row.get("BRGY_NAME", "N/A")
@@ -271,11 +276,33 @@ def create_fmr_map(input_gdf=None, pan_to=None):
         )
         geojson.add_child(folium.Popup(popup_html, max_width=400))
         geojson.add_to(fmap)
+        geo_layer_var_lines.append(f"geoLayers['{layer_name}'] = {geojson.get_name()};")
+
+    geo_layer_script = "\n".join(geo_layer_var_lines)
+    provinces = sorted(set(p.title() for p in gdf["PROV_NAME"].dropna()))
+    province_options = "".join([f"<option value='{p}'>{p}</option>" for p in provinces])
 
     js_ui = f"""
-    <div id="selection-panel" style="
-        position: fixed; bottom: 20px; left: 20px; background: rgba(255,255,255,0.95);
-        padding: 10px; border-radius: 8px; box-shadow: 0 2px 6px rgba(0,0,0,0.3); z-index: 9999; max-width: 300px;">
+    <link rel="stylesheet" href="https://unpkg.com/leaflet-draw/dist/leaflet.draw.css" />
+    <script src="https://unpkg.com/leaflet-draw/dist/leaflet.draw.js"></script>
+    <style>
+        #selection-panel {{
+            position: fixed;
+            bottom: 5px;
+            left: 5px;
+            background: rgba(255,255,255,0.95);
+            padding: 10px;
+            border-radius: 8px;
+            box-shadow: 0 2px 6px rgba(0,0,0,0.3);
+            z-index: 9999;
+            max-width: 250px;
+        }}
+        #selection-panel ul {{ max-height: 100px; overflow-y: auto; padding-left: 20px; }}
+        #selection-panel select, button {{ width: 100%; margin-top: 6px; }}
+        .clear-btn {{ background-color: #dc3545; color: white; }}
+        .clear-btn:hover {{ background-color: #a71d2a; }}
+    </style>
+    <div id="selection-panel">
         <b>Province Filter:</b>
         <select id="provinceSelect" onchange="filterByProvince()">
             <option value="All">All</option>
@@ -289,11 +316,15 @@ def create_fmr_map(input_gdf=None, pan_to=None):
             <option value="csv">CSV (attributes only)</option>
         </select>
         <button onclick="downloadSelected()">⬇ Download Selected</button>
-        <button onclick="clearSelections()" style="background-color:#dc3545;color:white;">🗑 Clear</button>
-        <button onclick="mergeFMRs()">🔄 Update FMR</button>
+        <button class="clear-btn"onclick="clearSelections()">🗑 Clear</button>
+        <button onclick="updateFMRs()">🔄 Update FMR</button>
     </div>
     <script>
         const selectedIds = new Set();
+        const geoLayers = {{}};
+
+        window.onload = function() {{ {geo_layer_script} }};
+
         function updateFMRList() {{
             const ul = document.getElementById("fmr-list");
             ul.innerHTML = ""; 
@@ -301,59 +332,66 @@ def create_fmr_map(input_gdf=None, pan_to=None):
                 const li = document.createElement("li");
                 li.textContent = "FMR-" + id;
                 ul.appendChild(li);
+                const layer = geoLayers["geoLayer_" + id];
+                if (layer) layer.setStyle({{color: "red", weight: 3.5}});
             }});
         }}
+
         function selectFMR(fmr_id) {{
             fetch("http://localhost:5000/select", {{
                 method: "POST",
-                headers: {{"Content-Type": "application/json"}},
-                body: JSON.stringify({{fmr_id}})
-            }}).then(res => res.json()).then(data => {{
+                headers: {{ "Content-Type": "application/json" }},
+                body: JSON.stringify({{fmr_id: fmr_id}})
+            }}).then(res => res.json())
+            .then(data => {{
                 if (data.status === "selected") {{
                     selectedIds.add(fmr_id);
                     updateFMRList();
-                }} else {{
-                    alert("Already selected.");
-                }}
+                }} else alert("Already selected.");
             }});
         }}
+
         function clearSelections() {{
             fetch("http://localhost:5000/clear", {{ method: "POST" }})
-            .then(res => res.json()).then(data => {{
+            .then(res => res.json())
+            .then(data => {{
                 if (data.status === "cleared") {{
                     selectedIds.clear();
                     updateFMRList();
+                    for (const key in geoLayers) geoLayers[key].setStyle({{color: "yellow", weight: 3.5}});
                 }}
             }});
         }}
+
         function filterByProvince() {{
             const prov = document.getElementById("provinceSelect").value;
             fetch("http://localhost:5000/filter", {{
                 method: "POST",
-                headers: {{"Content-Type": "application/json"}},
+                headers: {{ "Content-Type": "application/json" }},
                 body: JSON.stringify({{province: prov}})
-            }}).then(res => res.json()).then(data => {{
+            }}).then(res => res.json())
+            .then(data => {{
                 alert('Filtered: ' + data.count + ' FMRs');
                 location.reload();
             }});
         }}
-        function mergeFMRs() {{
+
+        function updateFMRs() {{
             if (!confirm("Update current FMR list?")) return;
-            fetch("http://localhost:5000/merge", {{ method: "POST" }})
-            .then(res => res.json()).then(data => {{
-                if (data.status === "success" || data.status === "info") {{
+            fetch("http://localhost:5000/update_fmr", {{ method: "POST" }})
+            .then(res => res.json())
+            .then(data => {{
+                if (data.status === "success") {{
                     alert(data.message);
                     location.reload();
                 }} else {{
-                    alert("Merge failed: " + data.message);
+                    alert("Update failed: " + data.message);
                 }}
             }});
         }}
+
         function downloadSelected() {{
-            if (selectedIds.size === 0) {{
-                alert("No FMRs selected.");
-                return;
-            }}
+            if (selectedIds.size === 0) return alert("No FMRs selected.");
             const format = document.getElementById("exportFormat").value;
             const link = document.createElement("a");
             link.href = `http://localhost:5000/export?format=${{format}}`;
@@ -371,6 +409,8 @@ def create_fmr_map(input_gdf=None, pan_to=None):
 
 
 class FMRMapWindow(QMainWindow):
+    """Main PyQT Window for FMR Interactive Map."""
+
     def __init__(self):
         super().__init__()
         self.setWindowTitle("FMR Interactive Map")
@@ -378,7 +418,6 @@ class FMRMapWindow(QMainWindow):
 
         layout = QVBoxLayout()
         self.webview = QWebEngineView()
-
         create_fmr_map()
         self.webview.load(QUrl("http://localhost:5000"))
         layout.addWidget(self.webview)
@@ -388,11 +427,17 @@ class FMRMapWindow(QMainWindow):
         self.setCentralWidget(container)
 
 
+# ==========================================================
+# Main Execution
+# ==========================================================
 if __name__ == "__main__":
-    # ✅ Call database generation on launch
-    updateFMRDatabase()
+    # ✅ Initial FMR database generation
+    getDatabase()
 
+    # ✅ Start Flask in a separate thread
     threading.Thread(target=run_flask, daemon=True).start()
+
+    # ✅ Launch PyQT Application
     app_qt = QApplication(sys.argv)
     window = FMRMapWindow()
     window.show()
