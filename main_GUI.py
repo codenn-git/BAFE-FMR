@@ -31,7 +31,6 @@ bsg_folder = r"C:\Users\user-307E123400\OneDrive - Philippine Space Agency\SDMAD
 # ==========================================================
 app = Flask(__name__)
 CORS(app)
-
 selected_features = []
 lock = threading.Lock()
 gdf = gpd.read_file(shapefile_path).to_crs(epsg=4326)
