@@ -288,9 +288,10 @@ def create_fmr_map(input_gdf=None):
             max-width: 250px;
         }}
         #selection-panel ul {{ max-height: 100px; overflow-y: auto; padding-left: 20px; }}
-        #selection-panel select, button {{ width: 100%; margin-top: 6px; }}
+        #selection-panel select, #selection-panel button {{ width: 100%; margin-top: 6px; }}
         .clear-btn {{ background-color: #dc3545; color: white; }}
         .clear-btn:hover {{ background-color: #a71d2a; }}
+        #processFMRBtn:disabled {{ background-color: #e0e0e0; color: #777777; cursor: not-allowed; }}
     </style>
     <div id="selection-panel">
         <b>Province Filter:</b>
@@ -298,8 +299,9 @@ def create_fmr_map(input_gdf=None):
             <option value="All">All</option>
             {province_options}
         </select>
-        <b>Selected FMRs:</b>
+        <b>Selected FMR(s):</b>
         <ul id="fmr-list"></ul>
+        <button id="processFMRBtn" disabled>Process FMR</button>
         <select id="exportFormat">
             <option value="geojson">GeoJSON</option>
             <option value="shp">Shapefile</option>
@@ -325,6 +327,8 @@ def create_fmr_map(input_gdf=None):
                 const layer = geoLayers["geoLayer_" + id];
                 if (layer) layer.setStyle({{color: "red", weight: 3.5}});
             }});
+            const processButton = document.getElementById("processFMRBtn");
+            processButton.disabled = selectedIds.size === 0;
         }}
 
         function selectFMR(fmr_id) {{
@@ -392,6 +396,7 @@ def create_fmr_map(input_gdf=None):
         }}
     </script>
     """
+
     fmap.get_root().html.add_child(folium.Element(js_ui))
     html_path = "fmr_interactive_map.html"
     fmap.save(html_path)
