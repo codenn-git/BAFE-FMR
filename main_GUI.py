@@ -40,15 +40,6 @@ filtered_gdf = gdf.copy()
 
 def getDatabase():
     """Scan FMR and BSG images, extracting match information and save results to 'fmr_database.csv'."""
-    import re
-    import rasterio
-    import pandas as pd
-    import geopandas as gpd
-    from shapely.geometry import box
-    from shapely.ops import transform as shapely_transform
-    from pyproj import Transformer
-    from datetime import datetime
-
     master_fmr = shapefile_path
     bsg_folder_path = bsg_folder
     fmr_db_file = os.path.join(os.path.dirname(master_fmr), "fmr_database.csv")
