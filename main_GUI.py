@@ -1,25 +1,38 @@
 import sys
 import os
+import re
+import shutil
+import threading
+import tempfile
+from datetime import datetime
+
+import pandas as pd
 import geopandas as gpd
 import folium
+import rasterio
+from shapely.geometry import box
+from shapely.ops import transform as shapely_transform
+from pyproj import Transformer
 from PyQt5.QtWidgets import QApplication, QMainWindow, QVBoxLayout, QWidget
 from PyQt5.QtWebEngineWidgets import QWebEngineView
 from PyQt5.QtCore import QUrl
 from flask import Flask, jsonify, request, send_file
 from flask_cors import CORS
 from waitress import serve
-import threading
-from datetime import datetime
-import tempfile
-import shutil
-import pandas as pd
 
-# === Master shapefile path ===
+# ==========================================================
+# Paths
+# ==========================================================
 shapefile_path = r"C:\Users\user-307E123400\OneDrive - Philippine Space Agency\FMR\.for GUI\Master FMR\master-fmr.shp"
+bsg_folder = r"C:\Users\user-307E123400\OneDrive - Philippine Space Agency\SDMAD_SHARED\PROJECTS\SAKA\FMR\GUI\BSG images"
+fmr_db_file = os.path.join(os.path.dirname(shapefile_path), "fmr_database.csv")
 
-# === Flask setup ===
+# ==========================================================
+# Flask and GeoData
+# ==========================================================
 app = Flask(__name__)
 CORS(app)
+
 selected_features = []
 lock = threading.Lock()
 gdf = gpd.read_file(shapefile_path).to_crs(epsg=4326)
@@ -33,7 +46,6 @@ def updateFMRs(master_path):
     master_gdf = gpd.read_file(master_path)
     master_crs = master_gdf.crs
     gdfs_to_merge = []
-
     for file in os.listdir(master_dir):
         if file.endswith('.shp'):
             base_name = os.path.splitext(file)[0]
@@ -49,7 +61,7 @@ def updateFMRs(master_path):
 
     if not gdfs_to_merge:
         print("No additional FMR shapefiles found to merge.")
-        return False  # Nothing merged
+        return False
 
     merged_gdf = pd.concat([master_gdf] + gdfs_to_merge, ignore_index=True)
     merged_gdf.to_file(master_path)
@@ -65,6 +77,82 @@ def updateFMRs(master_path):
                 shutil.move(full_file, os.path.join(merged_folder, file))
 
     return True
+
+
+def updateFMRDatabase():
+    """Update FMR database based on available FMRs and matching BSG images."""
+    # Load FMR
+    fmr_gdf = gpd.read_file(shapefile_path).to_crs("EPSG:32651")  
+
+    # List all .tif files
+    tif_files = [f for f in os.listdir(bsg_folder) if f.lower().endswith(".tif")]
+
+    # Transformer for FMR -> Raster CRS
+    fmr_transformer = Transformer.from_crs("EPSG:32651", "EPSG:4326", always_xy=True)
+
+    results = []
+    for idx, row in fmr_gdf.iterrows():
+        fmr_name = str(row.get("name", f"FMR_{idx}"))
+        fmr_geom = row.geometry
+        planned_length = fmr_geom.length
+        matched_images = []
+        for tif_file in tif_files:
+            tif_path = os.path.join(bsg_folder, tif_file)
+            with rasterio.open(tif_path) as src:
+                raster_bounds = box(*src.bounds)
+
+            fmr_geom_in_raster_crs = shapely_transform(fmr_transformer.transform, fmr_geom)
+
+            if fmr_geom_in_raster_crs.intersects(raster_bounds):
+                matched_images.append(tif_file)
+
+        if matched_images:
+            for tif_file in matched_images:
+                match = re.search(r"(\d{8})-(\d{6})", tif_file)
+                if match:
+                    raw_date, raw_time = match.groups()
+                    try:
+                        dt = datetime.strptime(raw_date + raw_time, "%Y%m%d%H%M%S")
+                        formatted_date = dt.strftime("%Y-%m-%d")
+                        formatted_time = dt.strftime("%H:%M:%S")
+                    except ValueError:
+                        formatted_date = None
+                        formatted_time = None
+                else:
+                    formatted_date = None
+                    formatted_time = None
+
+                results.append({
+                    "FMR": fmr_name,
+                    "BSG": tif_file,
+                    "Date": formatted_date,
+                    "Time": formatted_time,
+                    "Planned FMR Length": planned_length,
+                    "Current FMR Length": "",
+                    "FMR Progress": ""
+                })
+        else:
+            results.append({
+                "FMR": fmr_name,
+                "BSG": None,
+                "Date": None,
+                "Time": None,
+                "Planned FMR Length": planned_length,
+                "Current FMR Length": "",
+                "FMR Progress": ""
+            })
+
+    results_df = pd.DataFrame(results)
+
+    if os.path.exists(fmr_db_file):
+        existing_df = pd.read_csv(fmr_db_file)
+        final_df = pd.concat([existing_df, results_df], ignore_index=True).drop_duplicates(subset=["FMR", "BSG"])
+    else:
+        final_df = results_df
+
+    final_df.to_csv(fmr_db_file, index=False)
+
+    print(f"✅ Done! FMR database saved to:\n{fmr_db_file}")
 
 
 @app.route('/')
@@ -112,7 +200,11 @@ def merge_fmrs():
         gdf = gpd.read_file(shapefile_path).to_crs(epsg=4326)
         filtered_gdf = gdf.copy()
         create_fmr_map(gdf)
-        return jsonify({"status": "success", "message": "FMR list updated successfully"})
+
+        # ✅ New call
+        updateFMRDatabase()
+
+        return jsonify({"status": "success", "message": "FMR list updated and database refreshed successfully"})
     except Exception as e:
         return jsonify({"status": "error", "message": str(e)}), 500
 
@@ -123,7 +215,6 @@ def export_selected():
     with lock:
         if not selected_features:
             return jsonify({"status": "error", "message": "No FMRs selected"}), 400
-
         selected_gdf = gdf.loc[selected_features]
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         tempdir = tempfile.gettempdir()
@@ -154,7 +245,7 @@ def create_fmr_map(input_gdf=None, pan_to=None):
     center = map_gdf.union_all().centroid
     fmap = folium.Map(location=[center.y, center.x], zoom_start=10, tiles="Esri.WorldImagery")
 
-    provinces = sorted(set(p.title() for p in gdf['PROV_NAME'].dropna()))
+    provinces = sorted(set(p.title() for p in gdf["PROV_NAME"].dropna()))
     province_options = "".join([f"<option value='{p}'>{p}</option>" for p in provinces])
 
     for idx, row in map_gdf.iterrows():
@@ -172,7 +263,6 @@ def create_fmr_map(input_gdf=None, pan_to=None):
             <button onclick="selectFMR({idx})">Select this FMR</button>
         </div>
         """
-
         geojson = folium.GeoJson(
             row.geometry,
             name=layer_name,
@@ -206,14 +296,13 @@ def create_fmr_map(input_gdf=None, pan_to=None):
         const selectedIds = new Set();
         function updateFMRList() {{
             const ul = document.getElementById("fmr-list");
-            ul.innerHTML = "";
+            ul.innerHTML = ""; 
             selectedIds.forEach(id => {{
                 const li = document.createElement("li");
                 li.textContent = "FMR-" + id;
                 ul.appendChild(li);
             }});
         }}
-
         function selectFMR(fmr_id) {{
             fetch("http://localhost:5000/select", {{
                 method: "POST",
@@ -228,7 +317,6 @@ def create_fmr_map(input_gdf=None, pan_to=None):
                 }}
             }});
         }}
-
         function clearSelections() {{
             fetch("http://localhost:5000/clear", {{ method: "POST" }})
             .then(res => res.json()).then(data => {{
@@ -238,7 +326,6 @@ def create_fmr_map(input_gdf=None, pan_to=None):
                 }}
             }});
         }}
-
         function filterByProvince() {{
             const prov = document.getElementById("provinceSelect").value;
             fetch("http://localhost:5000/filter", {{
@@ -250,7 +337,6 @@ def create_fmr_map(input_gdf=None, pan_to=None):
                 location.reload();
             }});
         }}
-
         function mergeFMRs() {{
             if (!confirm("Update current FMR list?")) return;
             fetch("http://localhost:5000/merge", {{ method: "POST" }})
@@ -263,7 +349,6 @@ def create_fmr_map(input_gdf=None, pan_to=None):
                 }}
             }});
         }}
-
         function downloadSelected() {{
             if (selectedIds.size === 0) {{
                 alert("No FMRs selected.");
@@ -304,6 +389,9 @@ class FMRMapWindow(QMainWindow):
 
 
 if __name__ == "__main__":
+    # ✅ Call database generation on launch
+    updateFMRDatabase()
+
     threading.Thread(target=run_flask, daemon=True).start()
     app_qt = QApplication(sys.argv)
     window = FMRMapWindow()
