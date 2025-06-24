@@ -17,9 +17,9 @@ from matplotlib.figure import Figure
 
 class Preprocessing:
     '''Class for preprocessing the raster'''
-    def __init__(self, raster_path, vector_gdf, crs="EPSG:32651", pneo=False):
-        self.raster_path = raster_path
-        self.vector_gdf = vector_gdf.to_crs(crs)
+    def __init__(self, crs="EPSG:32651", pneo=False):
+        self.raster_path = None
+        self.vector_gdf = None
         self.crs = crs
         self.pneo = pneo
 
@@ -30,7 +30,10 @@ class Preprocessing:
         self._clipped_data = None
         self._clipped_transform = None
 
-    def reproject(self, target_crs="EPSG:32651", resampling=rasterio.enums.Resampling.nearest):
+    def reproject(self, raster_path, vector_gdf,  target_crs="EPSG:32651", resampling=rasterio.enums.Resampling.nearest):
+        self.raster_path = raster_path
+        self.vector_gdf = vector_gdf
+
         if self.pneo:
             with rasterio.open(self.raster_path) as src:
                 with rasterio.vrt.WarpedVRT(src, crs=target_crs, resampling=resampling) as vrt:
@@ -664,3 +667,113 @@ def export(obj, output_path, obj_type):
             raise ValueError("obj must be a GeoDataFrame for vector export.")
 
         return print(f"Vector exported successfully to {output_path}")
+    
+class Interaction:
+    def __init__(self, img, vector_path):
+        self.vector_data = gpd.read_file(vector_path).to_crs("EPSG:32651")
+        self.img_orig = np.moveaxis(img, 0, -1)  # Move the first axis to the last position
+        self.line_points = []
+        self.press_event = {'x': None, 'y': None}
+        self.drag_threshold = 5
+
+        self.fig, self.ax = plt.subplots(figsize=(10, 8))
+        self.ax.imshow(self.img_orig)
+        self.ax.set_title("Left-click to draw, Right-click to undo, Middle-click to reset, Enter to finish.")
+        self.ax.axis("off")
+
+        self.bind_events()
+
+    def bind_events(self):
+        self.fig.canvas.mpl_connect('button_press_event', self.onpress)
+        self.fig.canvas.mpl_connect('button_release_event', self.onrelease)
+        self.fig.canvas.mpl_connect('key_press_event', self.onkey)
+
+        mpl_interactions.zoom_factory(self.ax)
+        mpl_interactions.panhandler(self.fig)
+
+    def redraw(self):
+        xlim = self.ax.get_xlim()
+        ylim = self.ax.get_ylim()  
+
+        self.ax.clear()
+        self.ax.imshow(self.img_orig)
+        self.ax.set_title("Left-click to draw, Right-click to undo, Middle-click to reset, Enter to finish.")
+        self.ax.axis("off")
+
+        if self.line_points:
+            x_vals, y_vals = zip(*self.line_points)
+            self.ax.plot(x_vals, y_vals, 'g-', linewidth=2)
+            self.ax.plot(x_vals, y_vals, 'ro', markersize=4)
+
+        self.ax.set_xlim(xlim)
+        self.ax.set_ylim(ylim)
+
+        self.fig.canvas.draw()
+
+    def onpress(self, event):
+        if event.button == 1 and event.inaxes:
+            self.press_event['x'] = event.x
+            self.press_event['y'] = event.y
+
+    def onrelease(self, event):
+        if not event.inaxes:
+            return
+
+        if event.button == 1:
+            dx = abs(event.x - self.press_event['x'])
+            dy = abs(event.y - self.press_event['y'])
+            if dx < self.drag_threshold and dy < self.drag_threshold:
+                # Treat as a left-click
+                x, y = event.xdata, event.ydata
+                self.line_points.append((x, y))
+                self.redraw()
+
+        elif event.button == 3:
+            # Right-click: delete last point
+            if self.line_points:
+                self.line_points.pop()
+                self.redraw()
+
+        elif event.button == 2:
+            # Middle-click: reset all
+            self.line_points.clear()
+            self.redraw()
+
+    def onkey(self, event):
+        if event.key == 'enter' and len(self.line_points) >= 2:
+            x_vals, y_vals = zip(*self.line_points)
+            total_length = sum(math.hypot(x1 - x0, y1 - y0)
+                            for (x0, y0), (x1, y1) in zip(self.line_points[:-1], self.line_points[1:]))
+            
+            vector_length = self.vector_data.length.sum()
+            
+            mid_x = sum(x_vals) / len(x_vals)
+            mid_y = sum(y_vals) / len(y_vals)
+            self.ax.text(mid_x, mid_y, f"Length: {total_length:.2f} meters",
+                    color='blue', fontsize=12, bbox=dict(facecolor='white', alpha=0.7))
+            
+            progress = (total_length / vector_length) * 100
+            print(f"Progress: {progress:.2f}%")
+
+            self.ax.legend([f"FMR progress: {progress:.2f}%"], loc='lower center', fontsize=12, frameon=True)
+
+            self.fig.canvas.draw()
+
+        elif event.key == 'backspace':
+            if self.line_points:
+                self.line_points.pop()
+                self.redraw()
+
+    def show(self):
+        plt.show()
+
+    def export_line(self, output_path):
+        if not self.line_points:
+            raise ValueError("No line points to save.")
+        
+        line_geom = [shapely.geometry.LineString(self.line_points)]
+        gdf = gpd.GeoDataFrame(geometry=line_geom, crs="EPSG:32651")
+        
+        # Save to file
+        gdf.to_file(output_path, driver='ESRI Shapefile')
+        print(f"Line saved to {output_path}")
