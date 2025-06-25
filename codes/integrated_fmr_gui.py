@@ -33,7 +33,7 @@ from utilv1 import Preprocessing, Filters, Morph, Interaction, MeasureWidth, mea
 # Paths
 # ==========================================================
 shapefile_path = r"C:\Users\user-307E4B3400\OneDrive - Philippine Space Agency\SDMAD_SHARED\PROJECTS\SAKA\FMR\GUI\Master FMR\NE_master_fmr.shp"
-bsg_folder = r"C:\Users\user-307E4B3400\OneDrive - Philippine Space Agency\SDMAD_SHARED\PROJECTS\SAKA\FMR\GUI\BSG images"
+bsg_folder = r"C:\Users\user-307E4B3400\OneDrive - Philippine Space Agency\SDMAD_SHARED\PROJECTS\SAKA\FMR\GUI\Raster images"
 
 # ==========================================================
 # Flask Setup
@@ -60,29 +60,25 @@ def stretch_band(band, lower_percent=2, upper_percent=98):
 
 def find_matching_images(fmr_geometry, bsg_folder_path):
     """Find BSG images that intersect with the FMR geometry"""
-    tif_files = [f for f in os.listdir(bsg_folder_path) if f.lower().endswith(".tif")]
+    tif_files = [f for f in os.listdir(bsg_folder_path) if f.endswith("-Tiff.tif")]
     matching_images = []
     
     # Transformer for reprojection
     pre = Preprocessing()
-    transformer = Transformer.from_crs("EPSG:4326", "EPSG:32651", always_xy=True)
     
     for tif_file in tif_files:
         tif_path = os.path.join(bsg_folder_path, tif_file)
         try:
+            _, _, raster_bounds, _ = pre.reproject(tif_path, fmr_geometry)
             
-            with rasterio.open(tif_path) as src:
-                raster_bounds = box(*src.bounds)
-                
-            # Reproject FMR geometry to raster CRS
-            fmr_geom_in_raster_crs = shapely_transform(transformer.transform, fmr_geometry)
-            
-            if fmr_geom_in_raster_crs.intersects(raster_bounds):
-                matching_images.append({
-                    'filename': tif_file,
-                    'path': tif_path,
-                    'bounds': raster_bounds
-                })
+            if isinstance(raster_bounds, (list, tuple)) and len(raster_bounds) == 4:
+                bounds_geom = box(*raster_bounds)
+                if fmr_geometry.intersects(bounds_geom):
+                    matching_images.append({
+                        'filename': tif_file,
+                        'path': tif_path,
+                        'bounds': bounds_geom
+                    })
         except Exception as e:
             print(f"Error processing {tif_file}: {e}")
             continue
@@ -356,7 +352,7 @@ def updateFMRs(master_path):
 
 @app.route('/')
 def serve_map():
-    return send_file("fmr_interactive_map.html")
+    return send_file(r"C:\Users\user-307E4B3400\Desktop\BAFE FMR\GUI\fmr_interactive_map.html")
 
 
 @app.route('/select', methods=['POST'])
@@ -369,6 +365,19 @@ def select_fmr():
     return jsonify({"status": "error"}), 400
 
 
+@app.route('/deselect', methods=['POST'])
+def deselect_fmr():
+    global selected_fmrs
+    data = request.get_json()
+    fmr_id = data.get('fmr_id')
+    
+    if fmr_id in selected_fmrs:
+        selected_fmrs.remove(fmr_id)
+        return jsonify({"status": "deselected"})
+    else:
+        return jsonify({"status": "not_selected"})
+    
+    
 @app.route('/clear', methods=['POST'])
 def clear_selections():
     with lock:
@@ -534,42 +543,11 @@ def create_fmr_map(input_gdf=None):
             <b>Barangay:</b> {brgy}<br>
             <b>Municipality:</b> {mun}<br>
             <b>Province:</b> {prov}<br><br>
-            <button onclick="selectFMR({idx})">Select this FMR</button><br><br>
-            <div id="processing-buttons-{idx}" style="display: none;">
-                <button onclick="displayImage({idx})">🖼️ Display Image</button>
-                <button onclick="showProcessOptions({idx})">⚙️ Process</button>
-                <div id="process-options-{idx}" style="display: none; margin-top: 10px;">
-                    <div>
-                        <input type="radio" id="track-{idx}" name="workflow-{idx}" value="track">
-                        <label for="track-{idx}">Track Progress</label><br>
-                        <div id="track-options-{idx}" style="display: none; margin-left: 20px;">
-                            <input type="radio" id="auto-{idx}" name="track-mode-{idx}" value="automatic" checked>
-                            <label for="auto-{idx}">Automatic</label><br>
-                            <input type="radio" id="manual-{idx}" name="track-mode-{idx}" value="manual">
-                            <label for="manual-{idx}">Manual</label>
-                        </div>
-                    </div>
-                    <div>
-                        <input type="radio" id="extract-{idx}" name="workflow-{idx}" value="extract">
-                        <label for="extract-{idx}">Extract Width</label><br>
-                        <div id="extract-options-{idx}" style="display: none; margin-left: 20px;">
-                            <input type="radio" id="bsg-{idx}" name="image-type-{idx}" value="BSG" checked>
-                            <label for="bsg-{idx}">BSG Image</label><br>
-                            <input type="radio" id="pneo-{idx}" name="image-type-{idx}" value="PNEO">
-                            <label for="pneo-{idx}">PNEO Image</label>
-                        </div>
-                    </div>
-                    <button onclick="runProcessing({idx})" style="margin-top: 10px;">▶️ Run</button>
-                </div>
-            </div>
-            <div id="image-display-{idx}" style="display: none; margin-top: 10px;">
-                <!-- Image will be displayed here -->
-            </div>
-            <div id="results-{idx}" style="display: none; margin-top: 10px;">
-                <!-- Processing results will be displayed here -->
-            </div>
+            <button onclick=\"selectFMR({idx})\">Select FMR</button><br><br>
+            <button onclick="deselectFMR({idx})">Deselect FMR</button>
         </div>
         """
+
         geojson = folium.GeoJson(
             row.geometry,
             name=layer_name,
@@ -585,8 +563,9 @@ def create_fmr_map(input_gdf=None):
     province_options = "".join([f"<option value='{p}'>{p}</option>" for p in provinces])
 
     js_ui = f"""
-    <link rel="stylesheet" href="https://unpkg.com/leaflet-draw/dist/leaflet.draw.css" />
-    <script src="https://unpkg.com/leaflet-draw/dist/leaflet.draw.js"></script>
+    <link rel=\"stylesheet\" href=\"https://unpkg.com/leaflet-draw/dist/leaflet.draw.css\" />
+    <script src=\"https://unpkg.com/leaflet-draw/dist/leaflet.draw.js\"></script>
+    <script src=\"/static/fmr_ui_script.js\"></script>
     <style>
         #selection-panel {{
             position: fixed;
@@ -606,276 +585,37 @@ def create_fmr_map(input_gdf=None):
         #processFMRBtn:disabled {{ background-color: #e0e0e0; color: #777777; cursor: not-allowed; }}
         .image-preview {{ max-width: 300px; max-height: 200px; margin-top: 10px; }}
     </style>
-    <div id="selection-panel">
+    <div id=\"selection-panel\">
         <b>Province Filter:</b>
-        <select id="provinceSelect" onchange="filterByProvince()">
-            <option value="All">All</option>
+        <select id=\"provinceSelect\" onchange=\"filterByProvince()\">
+            <option value=\"All\">All</option>
             {province_options}
         </select>
         <b>Selected FMR(s):</b>
-        <ul id="fmr-list"></ul>
-        <button id="processFMRBtn" disabled>Process FMR</button>
-        <select id="exportFormat">
-            <option value="geojson">GeoJSON</option>
-            <option value="shp">Shapefile</option>
-            <option value="csv">CSV (attributes only)</option>
+        <ul id=\"fmr-list\"></ul>
+        <button id=\"processFMRBtn\" disabled>Process FMR</button>
+        <select id=\"exportFormat\">
+            <option value=\"geojson\">GeoJSON</option>
+            <option value=\"shp\">Shapefile</option>
+            <option value=\"csv\">CSV (attributes only)</option>
         </select>
-        <button onclick="downloadSelected()">⬇ Download Selected</button>
-        <button class="clear-btn"onclick="clearSelections()">🗑 Clear</button>
-        <button onclick="updateFMRs()">🔄 Update FMR</button>
+        <button onclick=\"downloadSelected()\">⬇ Download Selected</button>
+        <button class=\"clear-btn\" onclick=\"clearSelections()\">🗑 Clear</button>
+        <button onclick=\"updateFMRs()\">🔄 Update FMR</button>
+
+        <div id="dynamic-processing-panel" style="margin-top: 20px;"></div>
     </div>
-    <script>
-        const selectedIds = new Set();
-        const geoLayers = {{}};
-        let currentMatchingImages = {{}};
-
-        window.onload = function() {{ {geo_layer_script} }};
-
-        function updateFMRList() {{
-            const ul = document.getElementById("fmr-list");
-            ul.innerHTML = ""; 
-            selectedIds.forEach(id => {{
-                const li = document.createElement("li");
-                li.textContent = "FMR-" + id;
-                ul.appendChild(li);
-                const layer = geoLayers["geoLayer_" + id];
-                if (layer) layer.setStyle({{color: "red", weight: 3.5}});
-            }});
-            const processButton = document.getElementById("processFMRBtn");
-            processButton.disabled = selectedIds.size === 0;
-        }}
-
-        function selectFMR(fmr_id) {{
-            fetch("http://localhost:5000/select", {{
-                method: "POST",
-                headers: {{ "Content-Type": "application/json" }},
-                body: JSON.stringify({{fmr_id: fmr_id}})
-            }}).then(res => res.json())
-            .then(data => {{
-                if (data.status === "selected") {{
-                    selectedIds.add(fmr_id);
-                    updateFMRList();
-                    document.getElementById(`processing-buttons-${{fmr_id}}`).style.display = 'block';
-                    
-                    // Get matching images for this FMR
-                    fetch("http://localhost:5000/get_matching_images", {{
-                        method: "POST",
-                        headers: {{ "Content-Type": "application/json" }},
-                        body: JSON.stringify({{fmr_id: fmr_id}})
-                    }}).then(res => res.json())
-                    .then(imageData => {{
-                        if (imageData.status === "success") {{
-                            currentMatchingImages[fmr_id] = imageData.matching_images;
-                        }}
-                    }});
-                }} else alert("Already selected.");
-            }});
-        }}
-
-        function displayImage(fmr_id) {{
-            const images = currentMatchingImages[fmr_id];
-            if (!images || images.length === 0) {{
-                alert("No matching images found for this FMR");
-                return;
-            }}
-            
-            // Use the first matching image for now
-            const imagePath = images[0].path;
-            
-            fetch("http://localhost:5000/display_image", {{
-                method: "POST",
-                headers: {{ "Content-Type": "application/json" }},
-                body: JSON.stringify({{fmr_id: fmr_id, image_path: imagePath}})
-            }}).then(res => res.json())
-            .then(data => {{
-                if (data.status === "success") {{
-                    const imageDiv = document.getElementById(`image-display-${{fmr_id}}`);
-                    imageDiv.innerHTML = `<img src="data:image/png;base64,${{data.image_data}}" class="image-preview" alt="FMR Image Preview">`;
-                    imageDiv.style.display = 'block';
-                }} else {{
-                    alert(`Error displaying image: ${{data.message}}`);
-                }}
-            }}).catch(err => {{
-                alert(`Error: ${{err.message}}`);
-            }});
-        }}
-
-        function showProcessOptions(fmr_id) {{
-            const optionsDiv = document.getElementById(`process-options-${{fmr_id}}`);
-            if (optionsDiv.style.display === 'none') {{
-                optionsDiv.style.display = 'block';
-                
-                // Add event listeners for radio buttons
-                const trackRadio = document.getElementById(`track-${{fmr_id}}`);
-                const extractRadio = document.getElementById(`extract-${{fmr_id}}`);
-                const trackOptionsDiv = document.getElementById(`track-options-${{fmr_id}}`);
-                const extractOptionsDiv = document.getElementById(`extract-options-${{fmr_id}}`);
-                
-                trackRadio.addEventListener('change', function() {{
-                    if (this.checked) {{
-                        trackOptionsDiv.style.display = 'block';
-                        extractOptionsDiv.style.display = 'none';
-                    }}
-                }});
-                
-                extractRadio.addEventListener('change', function() {{
-                    if (this.checked) {{
-                        extractOptionsDiv.style.display = 'block';
-                        trackOptionsDiv.style.display = 'none';
-                    }}
-                }});
-            }} else {{
-                optionsDiv.style.display = 'none';
-            }}
-        }}
-
-        function runProcessing(fmr_id) {{
-            const images = currentMatchingImages[fmr_id];
-            if (!images || images.length === 0) {{
-                alert("No matching images found for this FMR");
-                return;
-            }}
-            
-            // Get selected workflow
-            const trackRadio = document.getElementById(`track-${{fmr_id}}`);
-            const extractRadio = document.getElementById(`extract-${{fmr_id}}`);
-            
-            let workflowType, workflowOptions = {{}};
-            
-            if (trackRadio.checked) {{
-                workflowType = 'track';
-                const autoRadio = document.getElementById(`auto-${{fmr_id}}`);
-                const manualRadio = document.getElementById(`manual-${{fmr_id}}`);
-                workflowOptions.mode = autoRadio.checked ? 'automatic' : 'manual';
-            }} else if (extractRadio.checked) {{
-                workflowType = 'extract';
-                const bsgRadio = document.getElementById(`bsg-${{fmr_id}}`);
-                const pneoRadio = document.getElementById(`pneo-${{fmr_id}}`);
-                workflowOptions.image_type = bsgRadio.checked ? 'BSG' : 'PNEO';
-            }} else {{
-                alert("Please select a processing workflow");
-                return;
-            }}
-            
-            // Use the first matching image
-            const imagePath = images[0].path;
-            
-            // Show processing indicator
-            const resultsDiv = document.getElementById(`results-${{fmr_id}}`);
-            resultsDiv.innerHTML = '<div>Processing... Please wait.</div>';
-            resultsDiv.style.display = 'block';
-            
-            fetch("http://localhost:5000/process_fmr", {{
-                method: "POST",
-                headers: {{ "Content-Type": "application/json" }},
-                body: JSON.stringify({{
-                    fmr_id: fmr_id,
-                    image_path: imagePath,
-                    workflow_type: workflowType,
-                    workflow_options: workflowOptions
-                }})
-            }}).then(res => res.json())
-            .then(data => {{
-                if (data.status === "success") {{
-                    let resultHtml = `<div><b>Processing Results:</b><br>`;
-                    resultHtml += `<b>Status:</b> ${{data.message}}<br>`;
-                    
-                    if (data.length) {{
-                        resultHtml += `<b>Length:</b> ${{data.length}}<br>`;
-                    }}
-                    if (data.progress) {{
-                        resultHtml += `<b>Progress:</b> ${{data.progress}}<br>`;
-                    }}
-                    if (data.mean_width) {{
-                        resultHtml += `<b>Mean Width:</b> ${{data.mean_width}}<br>`;
-                    }}
-                    
-                    resultHtml += `</div>`;
-                    resultsDiv.innerHTML = resultHtml;
-                }} else {{
-                    resultsDiv.innerHTML = `<div style="color: red;"><b>Error:</b> ${{data.message}}</div>`;
-                }}
-            }}).catch(err => {{
-                resultsDiv.innerHTML = `<div style="color: red;"><b>Error:</b> ${{err.message}}</div>`;
-            }});
-        }}
-
-        function clearSelections() {{
-            fetch("http://localhost:5000/clear", {{method: "POST"}})
-            .then(res => res.json())
-            .then(data => {{
-                if (data.status === "cleared") {{
-                    selectedIds.clear();
-                    updateFMRList();
-                    Object.values(geoLayers).forEach(layer => {{
-                        layer.setStyle({{color: "yellow", weight: 3.5}});
-                    }});
-                    
-                    // Hide all processing buttons and results
-                    document.querySelectorAll('[id^="processing-buttons-"]').forEach(el => {{
-                        el.style.display = 'none';
-                    }});
-                    document.querySelectorAll('[id^="image-display-"]').forEach(el => {{
-                        el.style.display = 'none';
-                    }});
-                    document.querySelectorAll('[id^="results-"]').forEach(el => {{
-                        el.style.display = 'none';
-                    }});
-                }}
-            }});
-        }}
-
-        function filterByProvince() {{
-            const select = document.getElementById("provinceSelect");
-            const province = select.value;
-            fetch("http://localhost:5000/filter", {{
-                method: "POST",
-                headers: {{ "Content-Type": "application/json" }},
-                body: JSON.stringify({{province: province}})
-            }}).then(res => res.json())
-            .then(data => {{
-                if (data.status === "filtered") {{
-                    alert(`Filtered to ${{data.count}} FMRs`);
-                    location.reload();
-                }}
-            }});
-        }}
-
-        function downloadSelected() {{
-            if (selectedIds.size === 0) {{
-                alert("No FMRs selected for download");
-                return;
-            }}
-            const format = document.getElementById("exportFormat").value;
-            const params = new URLSearchParams({{format: format}});
-            window.open(`http://localhost:5000/export?${{params.toString()}}`);
-        }}
-
-        function updateFMRs() {{
-            if (confirm("Update FMR data? This may take a while.")) {{
-                fetch("http://localhost:5000/update_fmr", {{method: "POST"}})
-                .then(res => res.json())
-                .then(data => {{
-                    if (data.status === "success") {{
-                        alert("FMR data updated successfully!");
-                        location.reload();
-                    }} else {{
-                        alert(`Error updating FMR: ${{data.message}}`);
-                    }}
-                }});
-            }}
-        }}
-    </script>
     """
 
-    html_content = fmap._repr_html_()
-    html_with_ui = html_content.replace("</body>", f"{js_ui}</body>")
+    # Add UI and JavaScript hook to HTML
+    fmap.get_root().header.add_child(folium.Element(f"<script>window.onload = function() {{ {geo_layer_script} }}</script>"))
+    fmap.get_root().html.add_child(folium.Element(js_ui))
 
-    with open("fmr_interactive_map.html", "w", encoding='utf-8') as f:
-        f.write(html_with_ui)
+    html_path = r"C:\Users\user-307E4B3400\Desktop\BAFE FMR\GUI\fmr_interactive_map.html"
+    fmap.save(html_path)
 
-    print("✅ Interactive FMR map created: fmr_interactive_map.html")
-    return html_with_ui
+    print("Interactive FMR map created: fmr_interactive_map.html")
+    return os.path.abspath(html_path)
 
 
 # ==========================================================
@@ -932,10 +672,10 @@ class FMRMainWindow(QMainWindow):
 
 def main():
     """Main function to run the FMR GUI application."""
-    print("🚀 Starting FMR Processing GUI...")
+    print("Starting FMR Processing GUI...")
     
     # Initialize the database and create initial map
-    print("📊 Initializing FMR database...")
+    print("Initializing FMR database...")
     getDatabase()
     
     print("🗺️ Creating initial FMR map...")
