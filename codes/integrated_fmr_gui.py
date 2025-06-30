@@ -18,7 +18,7 @@ from datetime import datetime
 import base64
 from io import BytesIO
 
-from PyQt5.QtWidgets import QApplication, QMainWindow, QVBoxLayout, QWidget
+from PyQt5.QtWidgets import QApplication, QMainWindow, QVBoxLayout, QWidget, QInputDialog
 from PyQt5.QtWebEngineWidgets import QWebEngineView
 from PyQt5.QtCore import QUrl
 from flask import Flask, jsonify, request, send_file
@@ -371,8 +371,8 @@ def deselect_fmr():
     data = request.get_json()
     fmr_id = data.get('fmr_id')
     
-    if fmr_id in selected_fmrs:
-        selected_fmrs.remove(fmr_id)
+    if fmr_id in selected_features:
+        selected_features.remove(fmr_id)
         return jsonify({"status": "deselected"})
     else:
         return jsonify({"status": "not_selected"})
@@ -442,16 +442,33 @@ def get_matching_images():
     fmr_id = request.json.get("fmr_id")
     if fmr_id is None:
         return jsonify({"status": "error", "message": "No FMR ID provided"}), 400
-    
+
     try:
         fmr_geometry = gdf.loc[fmr_id].geometry
         matching_images = find_matching_images(fmr_geometry, bsg_folder)
-        
+
+        if not matching_images:
+            return jsonify({
+                "status": "success",
+                "fmr_id": fmr_id,
+                "matching_images": [],
+                "message": "no matching image"
+            })
+
+        # Only return filename and bounds as GeoJSON for each matching image
+        image_list = [
+            {
+            "filename": img["filename"],
+            # "bounds": img["bounds"].__geo_interface__
+            }
+            for img in matching_images
+        ]
         return jsonify({
             "status": "success",
             "fmr_id": fmr_id,
-            "matching_images": matching_images
+            "matching_images": image_list
         })
+
     except Exception as e:
         return jsonify({"status": "error", "message": str(e)}), 500
 
@@ -543,7 +560,11 @@ def create_fmr_map(input_gdf=None):
             <b>Barangay:</b> {brgy}<br>
             <b>Municipality:</b> {mun}<br>
             <b>Province:</b> {prov}<br><br>
-            <button onclick=\"selectFMR({idx})\">Select FMR</button><br><br>
+            <b>Matching Images:</b><br>
+            <ul id="image-list-{idx}">
+            </ul>
+            <button onclick=\"getMatchingImages({idx})\">Get Matching Images</button><br>
+            <button onclick="selectFMR({idx})">Select FMR</button><br>
             <button onclick="deselectFMR({idx})">Deselect FMR</button>
         </div>
         """
@@ -630,7 +651,20 @@ class FMRMainWindow(QMainWindow):
         self.init_ui()
         self.flask_thread = None
         self.start_flask_server()
-        
+
+        # self.start_workflow()
+    
+    ## Workflow selection, 
+    # def start_workflow(self):
+    #     """Start the main workflow"""
+    #     # Get user inputs
+    #     new_ex, ok = QInputDialog.getItem(self, "Workflow Selection", 
+    #                                      "Do you want to process a New or Existing Project?", 
+    #                                      ["New", "Existing"], 0, False)
+    #     if not ok:
+    #         self.close()
+    #         return
+
     def init_ui(self):
         """Initialize the user interface."""
         self.setWindowTitle("FMR Processing GUI")

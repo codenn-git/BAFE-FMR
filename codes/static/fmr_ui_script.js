@@ -14,8 +14,8 @@ function updateFMRList() {
         const layer = geoLayers["geoLayer_" + id];
         if (layer) layer.setStyle({color: "red", weight: 3.5});
     });
-    const processButton = document.getElementById("processFMRBtn");
-    processButton.disabled = selectedIds.size === 0;
+    // const processButton = document.getElementById("processFMRBtn");
+    // processButton.disabled = selectedIds.size === 0;
 }
 
 function selectFMR(fmr_id) {
@@ -28,19 +28,36 @@ function selectFMR(fmr_id) {
         if (data.status === "selected") {
             selectedIds.add(fmr_id);
             updateFMRList();
-            injectProcessingPanel(fmr_id);
+            // injectProcessingPanel(fmr_id);
 
-            fetch("http://localhost:5000/get_matching_images", {
-                method: "POST",
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({fmr_id: fmr_id})
-            }).then(res => res.json())
-            .then(imageData => {
-                if (imageData.status === "success") {
-                    currentMatchingImages[fmr_id] = imageData.matching_images;
-                }
-            });
         } else alert("Already selected.");
+    });
+}
+
+function getMatchingImages(fmr_id) {
+    fetch("http://localhost:5000/get_matching_images", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({fmr_id: fmr_id})
+    }).then(res => res.json())
+    .then(data => {
+        if (data.status === "success") {
+            currentMatchingImages[fmr_id] = data.images;
+            const imageList = document.getElementById(`imagelist-${fmr_id}`);
+            imageList.innerHTML = "";
+            if (Array.isArray(data.images)) {
+                data.images.forEach(image => {
+                    const li = document.createElement("li");
+                    li.textContent = image.name;
+                    imageList.appendChild(li);
+                });
+            } else {
+                imageList.innerHTML = "<li>No images found.</li>";
+            }
+        }
+        else {
+            alert(`Error fetching images: ${data.message}`);
+        }
     });
 }
 
