@@ -183,12 +183,43 @@ function filterByProvince() {
 
 function downloadSelected() {
     if (selectedIds.size === 0) {
-        alert("No FMRs selected for download");
+        alert("No FMRs selected");
         return;
     }
-    const format = document.getElementById("exportFormat").value;
-    const params = new URLSearchParams({format: format});
-    window.open(`http://localhost:5000/export?${params.toString()}`);
+    fetch("http://localhost:5000/export", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+            selected_ids: Array.from(selectedIds)
+        })
+    })
+    .then(async response => {
+        if (!response.ok) {
+            let msg = "Download failed";
+            try {
+                const data = await response.json();
+                if (data && data.message) msg = data.message;
+            } catch (e) {}
+            throw new Error(msg);
+        }
+        return response.blob();
+    })
+    .then(blob => {
+        // Try to get filename from Content-Disposition header if possible
+        let filename = "exported_fmr.zip";
+        // The fetch API does not expose headers in .then(blob), so fallback to default name
+        const url = window.URL.createObjectURL(blob);
+        const a = document.createElement("a");
+        a.href = url;
+        a.download = filename;
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+        window.URL.revokeObjectURL(url);
+    })
+    .catch(err => {
+        alert(err.message);
+    });
 }
 
 function updateFMRs() {

@@ -32,8 +32,8 @@ from utilv1 import Preprocessing, Filters, Morph, Interaction, MeasureWidth, mea
 # ==========================================================
 # Paths
 # ==========================================================
-shapefile_path = r"C:\Users\user-307E4B3400\OneDrive - Philippine Space Agency\SDMAD_SHARED\PROJECTS\SAKA\FMR\GUI\Master FMR\NE_master_fmr.shp"
-bsg_folder = r"C:\Users\user-307E4B3400\OneDrive - Philippine Space Agency\SDMAD_SHARED\PROJECTS\SAKA\FMR\GUI\Raster images"
+shapefile_path = r"C:\Users\user-307E123400\OneDrive - Philippine Space Agency\SDMAD_SHARED\PROJECTS\SAKA\FMR\GUI\Master FMR\NE_master_fmr.shp"
+bsg_folder = r"C:\Users\user-307E123400\OneDrive - Philippine Space Agency\SDMAD_SHARED\PROJECTS\SAKA\FMR\GUI\Raster images"
 
 # ==========================================================
 # Flask Setup
@@ -352,7 +352,7 @@ def updateFMRs(master_path):
 
 @app.route('/')
 def serve_map():
-    return send_file(r"C:\Users\user-307E4B3400\Desktop\BAFE FMR\GUI\fmr_interactive_map.html")
+    return send_file(r"fmr_interactive_map.html")  # Path changed aina
 
 
 @app.route('/select', methods=['POST'])
@@ -527,7 +527,7 @@ def create_fmr_map(input_gdf=None):
         print("Shapefile is empty!")
         return ""
 
-    center = map_gdf.unary_union.centroid
+    center = map_gdf.union_all().centroid
     fmap = folium.Map(location=[center.y, center.x], zoom_start=10, tiles="Esri.WorldImagery")
 
     geo_layer_var_lines = []
@@ -611,7 +611,7 @@ def create_fmr_map(input_gdf=None):
     fmap.get_root().header.add_child(folium.Element(f"<script>window.onload = function() {{ {geo_layer_script} }}</script>"))
     fmap.get_root().html.add_child(folium.Element(js_ui))
 
-    html_path = r"C:\Users\user-307E4B3400\Desktop\BAFE FMR\GUI\fmr_interactive_map.html"
+    html_path = r"fmr_interactive_map.html" # Path changed aina 
     fmap.save(html_path)
 
     print("Interactive FMR map created: fmr_interactive_map.html")
