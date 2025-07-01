@@ -1,5 +1,6 @@
 ## removed get-matching-images function
 ## Available BSG images are now displayed in the popup
+## July 1, 7:37 PM test push to new-gui branch
 
 import sys
 import os

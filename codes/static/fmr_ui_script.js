@@ -1,4 +1,5 @@
 // JavaScript logic for FMR GUI
+// July 1, 7:37 PM test push to new-gui branch
 
 const selectedIds = new Set();
 const geoLayers = {};
