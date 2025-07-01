@@ -98,7 +98,6 @@ def process_tracking(image_path, fmr_geometry, mode='automatic'):
                                     buffer_dist = 1)
             
             final_line = measure_line(final_clipped_data, final_clipped_transform, spacing=3)
-            # ... rest of your automatic processing
             
             final_line_length = final_line.length.values[0]
             vector_length = fmr_geometry.length.sum()
@@ -212,6 +211,7 @@ def getDatabase():
         matched_images = []
         matched_dates = []
         matched_times = []
+        matched_paths = []
 
         for tif_file in tif_files:
             tif_path = os.path.join(bsg_folder_path, tif_file)
@@ -223,6 +223,7 @@ def getDatabase():
 
             if fmr_geom_in_raster_crs.intersects(raster_bounds):
                 matched_images.append(tif_file)
+                matched_paths.append(tif_path)
 
                 match = re.search(r"(\d{8})-(\d{6})", tif_file)
                 if match:
@@ -245,9 +246,9 @@ def getDatabase():
             "Time": ", ".join([t for t in matched_times if t]) if matched_times else None,
             "Planned FMR Length": planned_length,
             "Current FMR Length": "",
-            "FMR Progress": ""
-    })
-
+            "FMR Progress": "",
+            "Image Path": ", ".join(matched_paths) if matched_paths else None
+        })
 
     if os.path.exists(fmr_db_file):
         existing_df = pd.read_csv(fmr_db_file)
