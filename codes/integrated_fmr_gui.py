@@ -414,23 +414,86 @@ def update_fmr_route():
 
 @app.route('/export', methods=['GET'])
 def export_selected():
-    fmt = request.args.get("format", "geojson")
-    with lock:
-        if not selected_features:
-            return jsonify({"status": "error", "message": "No FMRs selected"}), 400
-        selected_gdf = gdf.loc[selected_features]
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        tempdir = tempfile.gettempdir()
-        if fmt == "shp":
-            export_path = os.path.join(tempdir, f"selected_fmrs_{timestamp}.shp")
-            selected_gdf.to_file(export_path)
-        elif fmt == "csv":
-            export_path = os.path.join(tempdir, f"selected_fmrs_{timestamp}.csv")
-            selected_gdf.drop(columns="geometry").to_csv(export_path, index=False)
+    """
+    Export selected FMRs as a zip containing GeoJSON, Shapefile, and CSV.
+    The zip and files are named based on the FMR ID(s).
+    Expects JSON: { "selected_ids": [list of indices] }
+    """
+    import zipfile
+    from flask import after_this_request
+    data = request.get_json()
+    ids = data.get("selected_ids", []) if data else []
+    print("DEBUG /export called, ids:", ids)
+    if not ids:
+        print("DEBUG: No FMRs selected")
+        return jsonify({"status": "error", "message": "No FMR(s) selected."}), 400
+
+    try:
+        master_gdf = gpd.read_file(shapefile_path)
+        ids = [int(i) for i in ids]
+        ids = [i for i in ids if 0 <= i < len(master_gdf)]
+        if not ids:
+            print("DEBUG: Invalid FMR indices")
+            return jsonify({"status": "error", "message": "Invalid FMR indices"}), 400
+        selected = master_gdf.iloc[ids]
+
+        # Determine export base name
+        if len(ids) == 1:
+            fmr_id = str(selected.iloc[0].get("FMR_ID", ids[0])) if "FMR_ID" in selected.columns else str(ids[0])
+            base_name = f"FMR_{fmr_id}"
         else:
-            export_path = os.path.join(tempdir, f"selected_fmrs_{timestamp}.geojson")
-            selected_gdf.to_file(export_path, driver="GeoJSON")
-        return send_file(export_path, as_attachment=True)
+            if "FMR_ID" in selected.columns:
+                id_list = [str(row["FMR_ID"]) for _, row in selected.iterrows()]
+            else:
+                id_list = [str(i) for i in ids]
+            base_name = f"multiFMR_{'_'.join(id_list)}"
+
+        export_dir = os.path.dirname(shapefile_path)
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        tempdir = tempfile.mkdtemp()
+
+        # GeoJSON
+        geojson_path = os.path.join(tempdir, f"{base_name}.geojson")
+        selected.to_file(geojson_path, driver="GeoJSON")
+        # CSV
+        csv_path = os.path.join(tempdir, f"{base_name}.csv")
+        selected.drop(columns="geometry").to_csv(csv_path, index=False)
+        # Shapefile (multiple files)
+        shp_base = os.path.join(tempdir, base_name)
+        selected.to_file(f"{shp_base}.shp")
+        # Gather all files
+        files_to_zip = [geojson_path, csv_path]
+        for ext in [".shp", ".shx", ".dbf", ".prj", ".cpg"]:
+            f = f"{shp_base}{ext}"
+            if os.path.exists(f):
+                files_to_zip.append(f)
+        # Zip
+        zip_path = os.path.join(export_dir, f"{base_name}_{timestamp}.zip")
+        with zipfile.ZipFile(zip_path, "w") as zipf:
+            for f in files_to_zip:
+                zipf.write(f, os.path.basename(f))
+        print("DEBUG: Exported zip to", zip_path)
+
+        message = f"FMR(s) exported successfully to:\n{zip_path}"
+
+        @after_this_request
+        def add_export_message_header(response):
+            # Only add header if not streaming (send_file disables custom headers for streamed files)
+            try:
+                response.headers.add("X-Export-Message", message)
+            except Exception:
+                pass
+            return response
+
+        return send_file(
+            zip_path,
+            as_attachment=True,
+            download_name=os.path.basename(zip_path),
+            mimetype="application/zip"
+        )
+    except Exception as e:
+        print("DEBUG: Exception in /export:", e)
+        return jsonify({"status": "error", "message": str(e)}), 500
 
 # ==========================================================
 # New Processing Routes
@@ -615,14 +678,9 @@ def create_fmr_map(input_gdf=None):
         <b>Selected FMR(s):</b>
         <ul id=\"fmr-list\"></ul>
         <button id=\"processFMRBtn\" disabled>Process FMR</button>
-        <select id=\"exportFormat\">
-            <option value=\"geojson\">GeoJSON</option>
-            <option value=\"shp\">Shapefile</option>
-            <option value=\"csv\">CSV (attributes only)</option>
-        </select>
-        <button onclick=\"downloadSelected()\">⬇ Download Selected</button>
+        <button onclick=\"downloadSelected()\">Export Selected FMR</button>
         <button class=\"clear-btn\" onclick=\"clearSelections()\">🗑 Clear</button>
-        <button onclick=\"updateFMRs()\">🔄 Update FMR</button>
+        <button onclick=\"updateFMRs()\">Update FMR</button>
 
         <div id="dynamic-processing-panel" style="margin-top: 20px;"></div>
     </div>

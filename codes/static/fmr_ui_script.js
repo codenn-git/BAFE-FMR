@@ -200,7 +200,7 @@ function filterByProvince() {
 
 function downloadSelected() {
     if (selectedIds.size === 0) {
-        alert("No FMRs selected");
+        alert("No FMR(s) selected.");
         return;
     }
     fetch("http://localhost:5000/export", {
@@ -214,17 +214,30 @@ function downloadSelected() {
         if (!response.ok) {
             let msg = "Download failed";
             try {
-                const data = await response.json();
+                const data = await response.clone().json();
                 if (data && data.message) msg = data.message;
-            } catch (e) {}
+            } catch (e) {
+                try {
+                    msg = await response.text();
+                } catch (e2) {}
+            }
             throw new Error(msg);
         }
-        return response.blob();
-    })
-    .then(blob => {
-        // Try to get filename from Content-Disposition header if possible
+        // Read the blob and then show the prompt (headers are available here)
+        const disposition = response.headers.get("Content-Disposition");
         let filename = "exported_fmr.zip";
-        // The fetch API does not expose headers in .then(blob), so fallback to default name
+        if (disposition) {
+            const match = disposition.match(/filename="?([^"]+)"?/);
+            if (match) filename = match[1];
+        }
+        const blob = await response.blob();
+        // Show export path as a window prompt if provided by backend (after blob to ensure headers are available)
+        const exportMsg = response.headers.get("X-Export-Message");
+        if (exportMsg) {
+            setTimeout(() => alert(exportMsg), 100); // Delay to ensure prompt shows after download
+        } else {
+            setTimeout(() => alert("FMR(s) exported successfully."), 100);
+        }
         const url = window.URL.createObjectURL(blob);
         const a = document.createElement("a");
         a.href = url;
