@@ -1,6 +1,6 @@
 ## removed get-matching-images function
 ## Available BSG images are now displayed in the popup
-## July 1, 7:37 PM test push to new-gui branch
+## July 2, 5:36PM, getDatabase() more efficient, processing for tracking added
 
 import sys
 import os
@@ -28,7 +28,7 @@ from flask import Flask, jsonify, request, send_file
 from flask_cors import CORS
 from waitress import serve
 
-from utilv1 import Preprocessing, Filters, Morph, MeasureWidth, measure_line, export
+from utilv1 import Preprocessing, Filters, Morph, MeasureWidth, measure_line, Interaction, export
 
 # ==========================================================
 # Paths
@@ -63,18 +63,39 @@ def create_image_preview(image_path, fmr_geometry):
     # create image preview, will edit later
     return
 
-def process_tracking(image_path, fmr_geometry, mode='automatic'):
+def process_tracking(fmr_id, image_path, mode='automatic'):
     """Process FMR tracking (adapted from your tracking workflow)"""
     try:
-        # This would use your processing pipeline
+        # Get the FMR feature using the FMR_ID
+        if fmr_id not in gdf.index:
+            return {
+                'status': 'error',
+                'message': f'FMR ID {fmr_id} not found in shapefile'
+            }
+        
+        # Get the FMR geometry from the GeoDataFrame
+        fmr_geometry = gdf.loc[fmr_id].geometry
+        fmr_name = str(gdf.loc[fmr_id].get("name", f"FMR_{fmr_id}"))
+        
+        # Validate image path exists
+        if not os.path.exists(image_path):
+            return {
+                'status': 'error',
+                'message': f'Image file not found: {image_path}'
+            }
+        
+        # Initialize preprocessing with the specific image and FMR geometry
         preprocessor = Preprocessing()
         preprocessor.reproject(image_path, fmr_geometry)
         clipped_data, clipped_transform = preprocessor.clipraster(buffer_dist=25, bbox=True)
         
         results = {
             'status': 'success',
+            'fmr_id': fmr_id,
+            'fmr_name': fmr_name,
             'mode': mode,
-            'message': f'Tracking completed in {mode} mode'
+            'image_path': image_path,
+            'message': f'Tracking completed for {fmr_name} in {mode} mode'
         }
         
         if mode == 'automatic':
@@ -87,30 +108,44 @@ def process_tracking(image_path, fmr_geometry, mode='automatic'):
             morph_warm = morph.process(warm_raster)
             morph_stretch = morph.process(stretch_raster)                                                                  
 
-            #merges the applied morphed warmth and stretch function
+            # Merges the applied morphed warmth and stretch function
             final_binary_raster = np.logical_or(morph_warm, morph_stretch)
-
-            final_binary_raster = cv2.morphologyEx(final_binary_raster.astype(np.uint8), cv2.MORPH_CLOSE, np.ones((3,3), np.uint8), iterations=3)
+            final_binary_raster = cv2.morphologyEx(final_binary_raster.astype(np.uint8), 
+                                                   cv2.MORPH_CLOSE, np.ones((3,3), np.uint8), iterations=3)
 
             final_clipped_data, final_clipped_transform = preprocessor.clipraster(
-                                    raster_data = final_binary_raster.astype(np.uint8),
-                                    transform = clipped_transform,
-                                    buffer_dist = 1)
+                                    raster_data=final_binary_raster.astype(np.uint8),
+                                    transform=clipped_transform,
+                                    buffer_dist=1)
             
             final_line = measure_line(final_clipped_data, final_clipped_transform, spacing=3)
             
-            final_line_length = final_line.length.values[0]
-            vector_length = fmr_geometry.length.sum()
-
-            results['length'] = final_line.length.values[0]
-            results['progress'] = (final_line_length / vector_length) * 100 #'Progress percentage would go here'
+            if final_line is not None and not final_line.empty:
+                final_line_length = final_line.length.values[0]
+                vector_length = fmr_geometry.length
+                
+                results['Current FMR Length'] = float(final_line_length)
+                results['vector_length'] = float(vector_length)
+                results['FMR progress'] = float((final_line_length / vector_length) * 100)
+            else:
+                results['Current FMR Length'] = None
+                results['FMR progress'] = None
+                results['message'] += ' - No road line detected'
             
         elif mode == 'manual':
             # Set up for manual interaction
             interaction = Interaction(clipped_data, fmr_geometry)
-            results['message'] = 'Manual tracking mode - interaction interface would be displayed'
+            results['message'] = f'Manual tracking mode initialized for {fmr_name}'
+            results['requires_interaction'] = True
         
         return results
+        
+    except Exception as e:
+        return {
+            'status': 'error',
+            'fmr_id': fmr_id if 'fmr_id' in locals() else None,
+            'message': f'Error in tracking: {str(e)}'
+        }
         
     except Exception as e:
         return {
@@ -118,112 +153,122 @@ def process_tracking(image_path, fmr_geometry, mode='automatic'):
             'message': f'Error in tracking: {str(e)}'
         }
 
-def process_extraction(image_path, fmr_geometry, image_type='BSG'):
-    """Process road width extraction (adapted from your extraction workflow)"""
-    try:
-        # This would use your processing pipeline
-        preprocessor = Preprocessing()
-        preprocessor.reproject(image_path, fmr_geometry)
+# def process_extraction(image_path, fmr_geometry, image_type='BSG'):
+#     """Process road width extraction (adapted from your extraction workflow)"""
+#     try:
+#         # This would use your processing pipeline
+#         preprocessor = Preprocessing()
+#         preprocessor.reproject(image_path, fmr_geometry)
         
-        results = {
-            'status': 'success',
-            'image_type': image_type,
-            'message': f'Width extraction completed for {image_type} image'
-        }
+#         results = {
+#             'status': 'success',
+#             'image_type': image_type,
+#             'message': f'Width extraction completed for {image_type} image'
+#         }
         
-        if image_type == 'PNEO':
-            # Apply PNEO-specific processing
-            # int, tol, res = 3, 0.15, 0.3
-            # clipped_data, clipped_transform = preprocessor.clipraster(bbox=True)
-            # filter = Filters(clipped_data)
-            # cielab = filter.cielab()
-            # ... rest of PNEO processing
+#         if image_type == 'PNEO':
+#             # Apply PNEO-specific processing
+#             # int, tol, res = 3, 0.15, 0.3
+#             # clipped_data, clipped_transform = preprocessor.clipraster(bbox=True)
+#             # filter = Filters(clipped_data)
+#             # cielab = filter.cielab()
+#             # ... rest of PNEO processing
             
-            results['mean_width'] = 'PNEO width calculation would go here'
+#             results['mean_width'] = 'PNEO width calculation would go here'
             
-        elif image_type == 'BSG':
-            # Apply BSG-specific processing
-            int, tol, res = 3, 0.4, 0.3
-            raster_data, _ = preprocessor.clipraster(bbox=True)
-            clipped_data, clipped_transform = preprocessor.clipraster(buffer_dist=25)
+#         elif image_type == 'BSG':
+#             # Apply BSG-specific processing
+#             int, tol, res = 3, 0.4, 0.3
+#             raster_data, _ = preprocessor.clipraster(bbox=True)
+#             clipped_data, clipped_transform = preprocessor.clipraster(buffer_dist=25)
 
-            #Filters: warmth and linear stretch
-            filter = Filters() #NEW: filter = Filters()
-            warm_raster = filter.enhance_image_warmth(clipped_data) #NEW: warm_raster  = filter.enhance_image_warmth(clipped_data)
-            stretch_raster = filter.enhance_linear_stretch(clipped_data)  #NEW: warm_raster  = filter.enhance_linear_stretch(clipped_data)
+#             #Filters: warmth and linear stretch
+#             filter = Filters() #NEW: filter = Filters()
+#             warm_raster = filter.enhance_image_warmth(clipped_data) #NEW: warm_raster  = filter.enhance_image_warmth(clipped_data)
+#             stretch_raster = filter.enhance_linear_stretch(clipped_data)  #NEW: warm_raster  = filter.enhance_linear_stretch(clipped_data)
 
-            #Apply Morphological Operations
-            morph = Morph()
-            morph_warm = morph.process(warm_raster)
-            morph_stretch = morph.process(stretch_raster)
+#             #Apply Morphological Operations
+#             morph = Morph()
+#             morph_warm = morph.process(warm_raster)
+#             morph_stretch = morph.process(stretch_raster)
 
-            #merges the applied morphed warmth and stretch function
-            merged_or = np.logical_or(morph_warm, morph_stretch)
-            initial_binary_raster = merged_or
+#             #merges the applied morphed warmth and stretch function
+#             merged_or = np.logical_or(morph_warm, morph_stretch)
+#             initial_binary_raster = merged_or
 
-            final_binary_transform = clipped_transform
+#             final_binary_transform = clipped_transform
  
-            # plt.imshow(final_clipped_data, cmap="gray")
-            final_binary_raster = morph.remove_small_islands(initial_binary_raster, min_size=1000)
-            final_binary_raster = cv2.morphologyEx(final_binary_raster.astype(np.uint8), 
-                                                   cv2.MORPH_CLOSE, np.ones((3,3), np.uint8), iterations=3)
+#             # plt.imshow(final_clipped_data, cmap="gray")
+#             final_binary_raster = morph.remove_small_islands(initial_binary_raster, min_size=1000)
+#             final_binary_raster = cv2.morphologyEx(final_binary_raster.astype(np.uint8), 
+#                                                    cv2.MORPH_CLOSE, np.ones((3,3), np.uint8), iterations=3)
 
-            measure = MeasureWidth(final_binary_raster, final_binary_transform, fmr_geometry)
-            measure.process(int=int, tol=tol, res=res)
+#             measure = MeasureWidth(final_binary_raster, final_binary_transform, fmr_geometry)
+#             measure.process(int=int, tol=tol, res=res)
 
-            results['mean_width'] = measure.clipped_transects['width'].mean()
+#             results['mean_width'] = measure.clipped_transects['width'].mean()
         
-        return results
+#         return results
         
-    except Exception as e:
-        return {
-            'status': 'error',
-            'message': f'Error in extraction: {str(e)}'
-        }
+#     except Exception as e:
+#         return {
+#             'status': 'error',
+#             'message': f'Error in extraction: {str(e)}'
+#         }
 
 # ==========================================================
 # Original Flask Routes
 # ==========================================================
 
+"""Scan FMR and BSG images, extracting match information and save results to 'fmr_database.csv'."""
+# edit: if fmr_db_file exists, it shouldn't iterate over ALL the FMR features again.
+# Instead compare the existing FMRs with the new ones and only iterate over the new ones.
+
 def getDatabase():
-    """Scan FMR and BSG images, extracting match information and save results to 'fmr_database.csv'."""
-    # edit: if fmr_db_file exists, it shouldn't iterate over ALL the FMR features again.
-    # Instead compare the existing FMRs with the new ones and only iterate over the new ones.
+    """Efficiently scan FMR and BSG images, extracting match information and save results to 'fmr_database.csv'."""
 
     master_fmr = shapefile_path
     bsg_folder_path = bsg_folder
     fmr_db_file = os.path.join(os.path.dirname(master_fmr), "fmr_database.csv")
 
-    # Read and reproject FMR
-    fmr_gdf = gpd.read_file(master_fmr).to_crs("EPSG:32651")  
+    fmr_gdf = gpd.read_file(master_fmr).to_crs("EPSG:32651")
+    fmr_to_latlon = Transformer.from_crs("EPSG:32651", "EPSG:4326", always_xy=True)
 
-    # List .tif files
-    tif_files = [f for f in os.listdir(bsg_folder_path) if f.lower().endswith(".tif")]
+    raster_bounds_dict = {}
+    for tif_file in os.listdir(bsg_folder_path):
+        if not tif_file.endswith("Tiff.tif"):
+            continue
+        tif_path = os.path.join(bsg_folder_path, tif_file)
+        try:
+            with rasterio.open(tif_path) as src:
+                raster_bounds = box(*src.bounds)
+                raster_bounds_dict[tif_file] = {
+                    "path": tif_path,
+                    "bounds_geom": raster_bounds
+                }
+        except Exception as e:
+            print(f"Error reading {tif_file}: {e}")
+            continue
 
-    # Transformer
-    fmr_transformer = Transformer.from_crs("EPSG:32651", "EPSG:4326", always_xy=True)
-
+    # === Part 2: Process each FMR ===
     results = []
     for idx, row in fmr_gdf.iterrows():
         fmr_name = str(row.get("name", f"FMR_{idx}"))
         fmr_geom = row.geometry
         planned_length = fmr_geom.length
+
+        # Reproject FMR geometry to EPSG:4326 (matches raster bounds)
+        fmr_geom_in_latlon = shapely_transform(fmr_to_latlon.transform, fmr_geom)
+
         matched_images = []
         matched_dates = []
         matched_times = []
         matched_paths = []
 
-        for tif_file in tif_files:
-            tif_path = os.path.join(bsg_folder_path, tif_file)
-            with rasterio.open(tif_path) as src:
-                raster_bounds = box(*src.bounds)
-
-            # Reproject FMR geometry to raster CRS
-            fmr_geom_in_raster_crs = shapely_transform(fmr_transformer.transform, fmr_geom)
-
-            if fmr_geom_in_raster_crs.intersects(raster_bounds):
+        for tif_file, data in raster_bounds_dict.items():
+            if fmr_geom_in_latlon.intersects(data["bounds_geom"]):
                 matched_images.append(tif_file)
-                matched_paths.append(tif_path)
+                matched_paths.append(data["path"])
 
                 match = re.search(r"(\d{8})-(\d{6})", tif_file)
                 if match:
@@ -247,16 +292,15 @@ def getDatabase():
             "Planned FMR Length": planned_length,
             "Current FMR Length": "",
             "FMR Progress": "",
-            "Image Path": ", ".join(matched_paths) if matched_paths else None
+            "Image Path": ", ".join(matched_paths) if matched_paths else ""
         })
 
+    results_df = pd.DataFrame(results)
     if os.path.exists(fmr_db_file):
         existing_df = pd.read_csv(fmr_db_file)
-        final_df = pd.concat([existing_df, pd.DataFrame(results)], ignore_index=True)
-        final_df.drop_duplicates(subset=["FMR"], inplace=True)
+        final_df = pd.concat([existing_df, results_df], ignore_index=True).drop_duplicates(subset=["FMR", "BSG"])
     else:
-        final_df = pd.DataFrame(results)
-        final_df.to_csv(fmr_db_file, index=False)
+        final_df = results_df
 
     final_df.to_csv(fmr_db_file, index=False)
     print(f"Done! FMR database saved to:\n{fmr_db_file}")
@@ -486,20 +530,55 @@ def process_fmr():
     image_path = data.get("image_path")
     workflow_type = data.get("workflow_type")  # 'track' or 'extract'
     workflow_options = data.get("workflow_options", {})
-    
-    if not all([fmr_id, image_path, workflow_type]):
+    fmr_db_file = os.path.join(os.path.dirname(shapefile_path), "fmr_database.csv")
+
+    global selected_features, gdf
+
+    if not all([fmr_id is not None, image_path, workflow_type]):
         return jsonify({"status": "error", "message": "Missing required parameters"}), 400
     
     try:
-        fmr_geometry = gdf.loc[fmr_id].geometry
+        # Validate that the FMR_ID is in selected_features
+        if fmr_id not in selected_features:
+            return jsonify({"status": "error", "message": f"FMR ID {fmr_id} is not selected"}), 400
+        
+        # Get image path from FMR database if not provided or validate existing path
+        if not image_path or not os.path.exists(image_path):
+            
+            if os.path.exists(fmr_db_file):
+                fmr_database = pd.read_csv(fmr_db_file)
+                fmr_name = str(gdf.loc[fmr_id].get("name", f"FMR_{fmr_id}"))
+                fmr_entry = fmr_database[fmr_database["FMR"] == fmr_name]
+                if not fmr_entry.empty and pd.notna(fmr_entry.iloc[0].get("Image Path")):
+                    image_paths = fmr_entry.iloc[0]["Image Path"].split(", ")
+                    if image_paths:
+                        image_path = image_paths[0]  # Use first available image
+                
+            if not image_path or not os.path.exists(image_path):
+                return jsonify({"status": "error", "message": "No valid image path found for this FMR"}), 400
         
         if workflow_type == 'track':
             mode = workflow_options.get('mode', 'automatic')  # 'automatic' or 'manual'
-            results = process_tracking(image_path, fmr_geometry, mode)
-            
-        elif workflow_type == 'extract':
-            image_type = workflow_options.get('image_type', 'BSG')  # 'BSG' or 'PNEO'
-            results = process_extraction(image_path, fmr_geometry, image_type)
+            results = process_tracking(fmr_id, image_path, mode)
+
+            # Update fmr_database.csv with new results
+            if results.get('status') == 'success':
+                fmr_name = str(gdf.loc[fmr_id].get("name", f"FMR_{fmr_id}"))
+                if os.path.exists(fmr_db_file):
+                    fmr_database = pd.read_csv(fmr_db_file)
+                    row_idx = fmr_database.index[fmr_database["FMR"] == fmr_name].tolist()
+                    if row_idx:
+                        idx = row_idx[0]
+                        if "Current FMR Length" in fmr_database.columns and results.get("Current FMR Length") is not None:
+                            fmr_database.at[idx, "Current FMR Length"] = results.get("Current FMR Length")
+                        if "FMR Progress" in fmr_database.columns and results.get("FMR progress") is not None:
+                            fmr_database.at[idx, "FMR Progress"] = results.get("FMR progress")
+                        fmr_database.to_csv(fmr_db_file, index=False)
+
+        # deal with this extraction workflow later  
+        # elif workflow_type == 'extract':
+        #     image_type = workflow_options.get('image_type', 'BSG')  # 'BSG' or 'PNEO'
+        #     results = process_extraction(fmr_id, image_path, image_type)
             
         else:
             return jsonify({"status": "error", "message": "Invalid workflow type"}), 400
