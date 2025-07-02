@@ -1,5 +1,5 @@
 // JavaScript logic for FMR GUI
-// July 1, 7:37 PM test push to new-gui branch
+// July 2, 7:46PM working on the front-end Image Overlay over the basemap
 
 const selectedIds = new Set();
 const geoLayers = {};
@@ -15,25 +15,46 @@ function updateFMRList() {
         const layer = geoLayers["geoLayer_" + id];
         if (layer) layer.setStyle({color: "red", weight: 3.5});
     });
-    // const processButton = document.getElementById("processFMRBtn");
-    // processButton.disabled = selectedIds.size === 0;
+    
+    document.getElementById("displayImagesBtn").disabled = selectedIds.size === 0;
+
 }
 
 function selectFMR(fmr_id) {
     fetch("http://localhost:5000/select", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({fmr_id: fmr_id})
-    }).then(res => res.json())
+        body: JSON.stringify({ fmr_id: fmr_id })
+    })
+    .then(res => res.json())
     .then(data => {
         if (data.status === "selected") {
             selectedIds.add(fmr_id);
             updateFMRList();
-            // injectProcessingPanel(fmr_id);
 
-        } else alert("Already selected.");
+            // Fetch matching image paths
+            fetch("http://localhost:5000/get_matching_images", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ fmr_id: fmr_id })
+            })
+            .then(res => res.json())
+            .then(imageData => {
+                if (imageData.status === "success" && imageData.images.length > 0) {
+                    currentMatchingImages[fmr_id] = imageData.images;
+                } else {
+                    currentMatchingImages[fmr_id] = []; // Explicitly mark as empty
+                }
+
+                // Enable or disable display button based on available images
+                updateDisplayButtonState();
+            });
+        } else {
+            alert("Already selected.");
+        }
     });
 }
+
 
 function deselectFMR(fmr_id) {
     fetch("http://localhost:5000/deselect", {
@@ -44,16 +65,11 @@ function deselectFMR(fmr_id) {
     .then(data => {
         if (data.status === "deselected") {
             selectedIds.delete(fmr_id);
+
+            delete currentMatchingImages[fmr_id];
+            updateDisplayButtonState();
+            
             updateFMRList();
-            
-            // Hide processing elements for this FMR
-            const processingButtons = document.getElementById(`processing-buttons-${fmr_id}`);
-            const imageDisplay = document.getElementById(`image-display-${fmr_id}`);
-            const results = document.getElementById(`results-${fmr_id}`);
-            
-            if (processingButtons) processingButtons.style.display = 'none';
-            if (imageDisplay) imageDisplay.style.display = 'none';
-            if (results) results.style.display = 'none';
             
             // Reset layer color to yellow
             const layer = geoLayers["geoLayer_" + fmr_id];
@@ -64,28 +80,45 @@ function deselectFMR(fmr_id) {
     });
 }
 
-function displayImage(fmr_id) {
-    const images = currentMatchingImages[fmr_id];
-    if (!images || images.length === 0) {
-        alert("No matching images found for this FMR");
+
+function displaySelectedImages() {
+    if (selectedIds.size === 0) {
+        alert("No FMRs selected.");
         return;
     }
-    const imagePath = images[0].path;
-    fetch("http://localhost:5000/display_image", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({fmr_id: fmr_id, image_path: imagePath})
-    }).then(res => res.json())
-    .then(data => {
-        if (data.status === "success") {
-            const imageDiv = document.getElementById(`image-display-${fmr_id}`);
-            imageDiv.innerHTML = `<img src="data:image/png;base64,${data.image_data}" class="image-preview">`;
-            imageDiv.style.display = 'block';
-        } else {
-            alert(`Error displaying image: ${data.message}`);
-        }
+
+    // Remove previous overlays
+    document.querySelectorAll(".leaflet-image-layer").forEach(el => el.remove());
+
+    selectedIds.forEach(fmr_id => {
+        const images = currentMatchingImages[fmr_id];
+        if (!images || images.length === 0) return;
+
+        const imagePath = images[0].path;
+        fetch("http://localhost:5000/display_image", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ fmr_id, image_path: imagePath })
+        }).then(res => res.json())
+        .then(data => {
+            if (data.status === "success") {
+                const base64Image = data.image_data;
+                const bounds = data.bounds;  // [[south, west], [north, east]]
+
+                console.log("Adding overlay for FMR:", fmr_id, bounds);
+
+                const overlay = L.imageOverlay(
+                    `data:image/png;base64,${base64Image}`,
+                    bounds,
+                    { opacity: 1.0 }
+                ).addTo(window._map);
+            } else {
+                console.error(`Image error: ${data.message}`);
+            }
+        });
     });
 }
+
 
 function runProcessing(fmr_id) {
     const images = currentMatchingImages[fmr_id];
@@ -146,6 +179,10 @@ function clearSelections() {
     .then(data => {
         if (data.status === "cleared") {
             selectedIds.clear();
+            
+            Object.keys(currentMatchingImages).forEach(key => delete currentMatchingImages[key]);
+            updateDisplayButtonState();
+
             updateFMRList();
             Object.values(geoLayers).forEach(layer => {
                 layer.setStyle({color: "yellow", weight: 3.5});
@@ -228,43 +265,12 @@ function updateFMRs() {
     }
 }
 
-function injectProcessingPanel(fmr_id) {
-    const container = document.getElementById("dynamic-processing-panel");
-    if (document.getElementById(`processing-buttons-${fmr_id}`)) return;  // Avoid duplicates
+function updateDisplayButtonState() {
+    const btn = document.getElementById("displayImagesBtn");
 
-    const html = `
-    <div id="processing-buttons-${fmr_id}" style="margin-bottom: 15px;">
-        <hr>
-        <h4>FMR-${fmr_id}</h4>
-        <button onclick="displayImage(${fmr_id})">🖼️ Display Image</button>
-        <button onclick="showProcessOptions(${fmr_id})">⚙️ Process</button>
-        <div id="process-options-${fmr_id}" style="display: none; margin-top: 10px;">
-            <div>
-                <input type="radio" id="track-${fmr_id}" name="workflow-${fmr_id}" value="track">
-                <label for="track-${fmr_id}">Track Progress</label><br>
-                <div id="track-options-${fmr_id}" style="display: none; margin-left: 20px;">
-                    <input type="radio" id="auto-${fmr_id}" name="track-mode-${fmr_id}" value="automatic" checked>
-                    <label for="auto-${fmr_id}">Automatic</label><br>
-                    <input type="radio" id="manual-${fmr_id}" name="track-mode-${fmr_id}" value="manual">
-                    <label for="manual-${fmr_id}">Manual</label>
-                </div>
-            </div>
-            <div>
-                <input type="radio" id="extract-${fmr_id}" name="workflow-${fmr_id}" value="extract">
-                <label for="extract-${fmr_id}">Extract Width</label><br>
-                <div id="extract-options-${fmr_id}" style="display: none; margin-left: 20px;">
-                    <input type="radio" id="bsg-${fmr_id}" name="image-type-${fmr_id}" value="BSG" checked>
-                    <label for="bsg-${fmr_id}">BSG Image</label><br>
-                    <input type="radio" id="pneo-${fmr_id}" name="image-type-${fmr_id}" value="PNEO">
-                    <label for="pneo-${fmr_id}">PNEO Image</label>
-                </div>
-            </div>
-            <button onclick="runProcessing(${fmr_id})" style="margin-top: 10px;">▶️ Run</button>
-        </div>
-        <div id="image-display-${fmr_id}" style="display: none; margin-top: 10px;"></div>
-        <div id="results-${fmr_id}" style="display: none; margin-top: 10px;"></div>
-    </div>
-    `;
+    const hasImages = Array.from(selectedIds).some(fmr_id =>
+        currentMatchingImages[fmr_id] && currentMatchingImages[fmr_id].length > 0
+    );
 
-    container.insertAdjacentHTML("beforeend", html);
+    btn.disabled = !hasImages;
 }

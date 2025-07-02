@@ -1,6 +1,7 @@
 ## removed get-matching-images function
 ## Available BSG images are now displayed in the popup
 ## July 2, 5:36PM, getDatabase() more efficient, processing for tracking added
+## July 2, 7:47PM, worked on the display functions for image preview over the basemap (still on-going)
 
 import sys
 import os
@@ -27,18 +28,20 @@ from PyQt5.QtCore import QUrl
 from flask import Flask, jsonify, request, send_file
 from flask_cors import CORS
 from waitress import serve
+import base64
+from io import BytesIO
 
 from utilv1 import Preprocessing, Filters, Morph, MeasureWidth, measure_line, Interaction, export
 
+import matplotlib
+matplotlib.use("Agg")
 # ==========================================================
 # Paths
-# ==========================================================
 shapefile_path = r"C:\Users\user-307E4B3400\OneDrive - Philippine Space Agency\SDMAD_SHARED\PROJECTS\SAKA\FMR\GUI\Master FMR\NE_master_fmr.shp"
 bsg_folder = r"C:\Users\user-307E4B3400\OneDrive - Philippine Space Agency\SDMAD_SHARED\PROJECTS\SAKA\FMR\GUI\Raster images"
 
 # ==========================================================
 # Flask Setup
-# ==========================================================
 app = Flask(__name__)
 CORS(app)
 selected_features = []
@@ -49,19 +52,7 @@ gdf = gpd.read_file(shapefile_path).to_crs(epsg=4326)  # Reproject to WGS84
 filtered_gdf = gdf.copy()
 
 # ==========================================================
-# Processing Functions (adapted from your main-v1.1.py)
-# ==========================================================
-
-def stretch_band(band, lower_percent=2, upper_percent=98):
-    """Stretch the bands of the image for display purposes"""
-    lower = np.percentile(band, lower_percent)
-    upper = np.percentile(band, upper_percent)
-    stretched = np.clip((band - lower) / (upper - lower), 0, 1)
-    return stretched
-
-def create_image_preview(image_path, fmr_geometry):
-    # create image preview, will edit later
-    return
+# Processing Functions
 
 def process_tracking(fmr_id, image_path, mode='automatic'):
     """Process FMR tracking (adapted from your tracking workflow)"""
@@ -75,6 +66,7 @@ def process_tracking(fmr_id, image_path, mode='automatic'):
         
         # Get the FMR geometry from the GeoDataFrame
         fmr_geometry = gdf.loc[fmr_id].geometry
+        fmr_gdf = gpd.GeoDataFrame({'geometry': fmr_geometry}, crs=gdf.crs)
         fmr_name = str(gdf.loc[fmr_id].get("name", f"FMR_{fmr_id}"))
         
         # Validate image path exists
@@ -86,7 +78,7 @@ def process_tracking(fmr_id, image_path, mode='automatic'):
         
         # Initialize preprocessing with the specific image and FMR geometry
         preprocessor = Preprocessing()
-        preprocessor.reproject(image_path, fmr_geometry)
+        preprocessor.reproject(image_path, fmr_gdf)
         clipped_data, clipped_transform = preprocessor.clipraster(buffer_dist=25, bbox=True)
         
         results = {
@@ -134,7 +126,7 @@ def process_tracking(fmr_id, image_path, mode='automatic'):
             
         elif mode == 'manual':
             # Set up for manual interaction
-            interaction = Interaction(clipped_data, fmr_geometry)
+            interaction = Interaction(clipped_data, fmr_gdf)
             results['message'] = f'Manual tracking mode initialized for {fmr_name}'
             results['requires_interaction'] = True
         
@@ -343,6 +335,76 @@ def updateFMRs(master_path):
             if os.path.isfile(full_file):
                 shutil.move(full_file, os.path.join(merged_folder, file))
 
+## ================= DISPLAY FUNCTIONS =============== ##
+
+def stretch_band(band, lower_percent=2, upper_percent=98):
+    """Stretch the bands of the image for display purposes"""
+    lower = np.percentile(band, lower_percent)
+    upper = np.percentile(band, upper_percent)
+    stretched = np.clip((band - lower) / (upper - lower), 0, 1)
+    return stretched
+
+def create_image_preview(image_path, fmr_gdf):
+    try:
+        preprocessor = Preprocessing()
+        preprocessor.reproject(image_path, fmr_gdf) #check back on this aina-july2
+        clipped_data, clipped_transform = preprocessor.clipraster(bbox=True)
+
+        # Stretch RGB bands
+        rgb = np.stack([
+            stretch_band(clipped_data[0]),
+            stretch_band(clipped_data[1]),
+            stretch_band(clipped_data[2])
+        ], axis=-1)
+
+        # Convert image to PNG
+        fig, ax = plt.subplots(figsize=(6, 6), dpi=150)
+        ax.imshow(rgb)
+        ax.axis("off")
+
+        buf = BytesIO()
+        plt.savefig(buf, format="png", bbox_inches='tight', pad_inches=0, transparent=True)
+        plt.close(fig)
+        buf.seek(0)
+
+        # Encode PNG to base64
+        image_base64 = base64.b64encode(buf.read()).decode('utf-8')
+
+        # Get raster bounds in WGS84
+
+        height, width = clipped_data.shape[1:]
+        bounds = rasterio.transform.array_bounds(height, width, clipped_transform)  # (south, west, north, east)
+        transformer = Transformer.from_crs("EPSG:32651", "EPSG:4326", always_xy=True)
+        minx, miny = transformer.transform(bounds[1], bounds[0])
+        maxx, maxy = transformer.transform(bounds[3], bounds[2])
+        image_bounds = [[miny, minx], [maxy, maxx]]  # Leaflet uses [[south, west], [north, east]]
+
+        return {"base64": image_base64, "bounds": image_bounds}
+
+    except Exception as e:
+        print(f"Error creating preview: {e}")
+        return None
+    
+## ==========================================================
+
+@app.route('/get_matching_images', methods=['POST'])
+def get_matching_images():
+    data = request.json
+    fmr_id = data.get("fmr_id")
+    fmr_name = str(gdf.loc[fmr_id].get("name", f"FMR_{fmr_id}"))
+    fmr_db_file = os.path.join(os.path.dirname(shapefile_path), "fmr_database.csv")
+
+    if not os.path.exists(fmr_db_file):
+        return jsonify({"status": "error", "message": "FMR database not found"}), 404
+
+    fmr_database = pd.read_csv(fmr_db_file)
+    row = fmr_database[fmr_database["FMR"] == fmr_name]
+    if row.empty or pd.isna(row.iloc[0]["Image Path"]):
+        return jsonify({"status": "error", "message": "No image found for FMR"}), 404
+
+    image_paths = row.iloc[0]["Image Path"].split(", ")
+    images = [{"filename": os.path.basename(p), "path": p} for p in image_paths if os.path.exists(p)]
+    return jsonify({"status": "success", "images": images})
 
 @app.route('/')
 def serve_map():
@@ -493,10 +555,8 @@ def export_selected():
 # New Processing Routes
 # ==========================================================
 
-
 @app.route('/display_image', methods=['POST'])
 def display_image():
-    """Display the selected image clipped to FMR extent"""
     data = request.json
     fmr_id = data.get("fmr_id")
     image_path = data.get("image_path")
@@ -506,12 +566,14 @@ def display_image():
     
     try:
         fmr_geometry = gdf.loc[fmr_id].geometry
-        image_preview = create_image_preview(image_path, fmr_geometry)
+        fmr_gdf = gpd.GeoDataFrame({"geometry": [fmr_geometry]}, crs="EPSG:4326", index=[0])
+        preview = create_image_preview(image_path, fmr_gdf)
         
-        if image_preview:
+        if preview:
             return jsonify({
                 "status": "success",
-                "image_data": image_preview,
+                "image_data": preview["base64"],
+                "bounds": preview["bounds"],  # [[south, west], [north, east]]
                 "fmr_id": fmr_id,
                 "image_path": image_path
             })
@@ -699,8 +761,8 @@ def create_fmr_map(input_gdf=None):
         </select>
         <b>Selected FMR(s):</b>
         <ul id=\"fmr-list\"></ul>
-        <button id=\"processFMRBtn\" disabled>Process FMR</button>
-        <button onclick=\"downloadSelected()\">Download Selected</button>
+        <button id="displayImagesBtn" onclick="displaySelectedImages()" disabled>Display Images</button>
+        <button onclick="downloadSelected()">Export Selected</button>
         <button class=\"clear-btn\" onclick=\"clearSelections()\">🗑 Clear</button>
         <button onclick=\"updateFMRs()\">🔄 Update FMR</button>
 
@@ -713,6 +775,16 @@ def create_fmr_map(input_gdf=None):
     fmap.get_root().html.add_child(folium.Element(js_ui))
 
     html_path = r"C:\Users\user-307E4B3400\Desktop\BAFE FMR\fmr_interactive_map.html" # Path changed aina 
+    
+    fmap.get_root().html.add_child(folium.Element("""
+        <script>
+            L.Map.addInitHook(function () {
+                window._map = this; 
+                console.log("Leaflet map initialized and exposed as window._map");
+            });
+        </script>
+        """))
+
     fmap.save(html_path)
 
     print("Interactive FMR map created: fmr_interactive_map.html")
