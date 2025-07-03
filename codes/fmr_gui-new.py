@@ -1,7 +1,6 @@
 ## removed get-matching-images function
 ## Available BSG images are now displayed in the popup
-## July 2, 5:36PM, getDatabase() more efficient, processing for tracking added
-## July 2, 7:47PM, worked on the display functions for image preview over the basemap (still on-going)
+## July 3, 11:27AM getDatabase() more efficient, display button not enabled when selecting FMRs
 
 import sys
 import os
@@ -217,15 +216,29 @@ def process_tracking(fmr_id, image_path, mode='automatic'):
 # Instead compare the existing FMRs with the new ones and only iterate over the new ones.
 
 def getDatabase():
-    """Efficiently scan FMR and BSG images, extracting match information and save results to 'fmr_database.csv'."""
+    """Efficiently scan FMR and BSG images, log all raster-FMR matches (1 row per match), sorted numerically by FMR index and date. Skips entries that are already in the database."""
 
     master_fmr = shapefile_path
     bsg_folder_path = bsg_folder
     fmr_db_file = os.path.join(os.path.dirname(master_fmr), "fmr_database.csv")
 
+    # Load FMRs in EPSG:32651
     fmr_gdf = gpd.read_file(master_fmr).to_crs("EPSG:32651")
-    fmr_to_latlon = Transformer.from_crs("EPSG:32651", "EPSG:4326", always_xy=True)
 
+    # Transformer from EPSG:4326 (raster bounds) to EPSG:32651 (FMR geometries)
+    raster_to_fmr_crs = Transformer.from_crs("EPSG:4326", "EPSG:32651", always_xy=True)
+
+    # Load existing DB (if exists)
+    if os.path.exists(fmr_db_file):
+        existing_df = pd.read_csv(fmr_db_file)
+        existing_keys = set(
+            zip(existing_df["FMR"], existing_df["BSG"], existing_df["Date"])
+        )
+    else:
+        existing_df = pd.DataFrame()
+        existing_keys = set()
+
+    # === Part 1: Preload raster bounds and reproject to EPSG:32651 ===
     raster_bounds_dict = {}
     for tif_file in os.listdir(bsg_folder_path):
         if not tif_file.endswith("Tiff.tif"):
@@ -233,66 +246,91 @@ def getDatabase():
         tif_path = os.path.join(bsg_folder_path, tif_file)
         try:
             with rasterio.open(tif_path) as src:
-                raster_bounds = box(*src.bounds)
+                minx, miny, maxx, maxy = src.bounds
+                minx_t, miny_t = raster_to_fmr_crs.transform(minx, miny)
+                maxx_t, maxy_t = raster_to_fmr_crs.transform(maxx, maxy)
+                reprojected_bounds = box(minx_t, miny_t, maxx_t, maxy_t)
                 raster_bounds_dict[tif_file] = {
                     "path": tif_path,
-                    "bounds_geom": raster_bounds
+                    "bounds_geom": reprojected_bounds
                 }
         except Exception as e:
             print(f"Error reading {tif_file}: {e}")
             continue
 
-    # === Part 2: Process each FMR ===
+    # === Part 2: For each FMR, log all raster matches ===
     results = []
     for idx, row in fmr_gdf.iterrows():
         fmr_name = str(row.get("name", f"FMR_{idx}"))
         fmr_geom = row.geometry
         planned_length = fmr_geom.length
 
-        # Reproject FMR geometry to EPSG:4326 (matches raster bounds)
-        fmr_geom_in_latlon = shapely_transform(fmr_to_latlon.transform, fmr_geom)
-
-        matched_images = []
-        matched_dates = []
-        matched_times = []
-        matched_paths = []
+        matched = False
 
         for tif_file, data in raster_bounds_dict.items():
-            if fmr_geom_in_latlon.intersects(data["bounds_geom"]):
-                matched_images.append(tif_file)
-                matched_paths.append(data["path"])
-
+            if fmr_geom.intersects(data["bounds_geom"]):
+                matched = True
                 match = re.search(r"(\d{8})-(\d{6})", tif_file)
                 if match:
                     raw_date, raw_time = match.groups()
                     try:
                         dt = datetime.strptime(raw_date + raw_time, "%Y%m%d%H%M%S")
-                        matched_dates.append(dt.strftime("%Y-%m-%d"))
-                        matched_times.append(dt.strftime("%H:%M:%S"))
+                        formatted_date = dt.strftime("%Y-%m-%d")
+                        formatted_time = dt.strftime("%H:%M:%S")
                     except ValueError:
-                        matched_dates.append("")
-                        matched_times.append("")
+                        formatted_date = ""
+                        formatted_time = ""
                 else:
-                    matched_dates.append("")
-                    matched_times.append("")
+                    formatted_date = ""
+                    formatted_time = ""
 
-        results.append({
-            "FMR": fmr_name,
-            "BSG": ", ".join(matched_images) if matched_images else None,
-            "Date": ", ".join([d for d in matched_dates if d]) if matched_dates else None,
-            "Time": ", ".join([t for t in matched_times if t]) if matched_times else None,
-            "Planned FMR Length": planned_length,
-            "Current FMR Length": "",
-            "FMR Progress": "",
-            "Image Path": ", ".join(matched_paths) if matched_paths else ""
-        })
+                # ✅ Skip duplicates before appending
+                if (fmr_name, tif_file, formatted_date) in existing_keys:
+                    continue
 
+                results.append({
+                    "FMR": fmr_name,
+                    "BSG": tif_file,
+                    "Date": formatted_date,
+                    "Time": formatted_time,
+                    "Planned FMR Length": planned_length,
+                    "Current FMR Length": "",
+                    "FMR Progress": "",
+                    "Image Path": data["path"]
+                })
+
+        if not matched:
+            if (fmr_name, None, None) not in existing_keys:
+                results.append({
+                    "FMR": fmr_name,
+                    "BSG": None,
+                    "Date": None,
+                    "Time": None,
+                    "Planned FMR Length": planned_length,
+                    "Current FMR Length": "",
+                    "FMR Progress": "",
+                    "Image Path": ""
+                })
+
+    # === Part 3: Create DataFrame and sort ===
     results_df = pd.DataFrame(results)
-    if os.path.exists(fmr_db_file):
-        existing_df = pd.read_csv(fmr_db_file)
-        final_df = pd.concat([existing_df, results_df], ignore_index=True).drop_duplicates(subset=["FMR", "BSG"])
+
+    # Extract numeric index from FMR names (e.g., FMR_0, FMR_10 → 0, 10)
+    results_df["FMR_INDEX"] = results_df["FMR"].str.extract(r"(\d+)", expand=False).astype(int)
+
+    # Ensure 'Date' is datetime for proper sorting
+    results_df["Date"] = pd.to_datetime(results_df["Date"], errors="coerce")
+
+    # === Part 4: Append and sort ===
+    if not existing_df.empty:
+        final_df = pd.concat([existing_df, results_df], ignore_index=True)
     else:
         final_df = results_df
+
+    final_df["FMR_INDEX"] = final_df["FMR"].str.extract(r"(\d+)", expand=False).astype(int)
+    final_df["Date"] = pd.to_datetime(final_df["Date"], errors="coerce")
+    final_df = final_df.sort_values(by=["FMR_INDEX", "Date"])
+    final_df = final_df.drop(columns=["FMR_INDEX"])
 
     final_df.to_csv(fmr_db_file, index=False)
     print(f"Done! FMR database saved to:\n{fmr_db_file}")
