@@ -1,5 +1,5 @@
 // JavaScript logic for FMR GUI
-// July 2, 7:46PM working on the front-end Image Overlay over the basemap
+// July 3, 10:22PM fixed the display button
 
 const selectedIds = new Set();
 const geoLayers = {};
@@ -16,8 +16,7 @@ function updateFMRList() {
         if (layer) layer.setStyle({color: "red", weight: 3.5});
     });
     
-    document.getElementById("displayImagesBtn").disabled = selectedIds.size === 0;
-
+    updateDisplayButtonState();
 }
 
 function selectFMR(fmr_id) {
@@ -33,28 +32,35 @@ function selectFMR(fmr_id) {
             updateFMRList();
 
             // Fetch matching image paths
-            fetch("http://localhost:5000/get_matching_images", {
+            return fetch("http://localhost:5000/get_matching_images", {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
                 body: JSON.stringify({ fmr_id: fmr_id })
-            })
-            .then(res => res.json())
-            .then(imageData => {
-                if (imageData.status === "success" && imageData.images.length > 0) {
-                    currentMatchingImages[fmr_id] = imageData.images;
-                } else {
-                    currentMatchingImages[fmr_id] = []; // Explicitly mark as empty
-                }
-
-                // Enable or disable display button based on available images
-                updateDisplayButtonState();
             });
         } else {
             alert("Already selected.");
+            throw new Error("Already selected"); // Stop the chain
         }
+    })
+    .then(res => res.json())
+    .then(imageData => {
+        if (imageData.status === "success" && imageData.images.length > 0) {
+            currentMatchingImages[fmr_id] = imageData.images;
+            console.log(`FMR ${fmr_id} has ${imageData.images.length} images`);
+        } else {
+            currentMatchingImages[fmr_id] = []; // Explicitly mark as empty
+            console.log(`FMR ${fmr_id} has no images`);
+        }
+
+        // Enable or disable display button based on available images
+        updateDisplayButtonState();
+    })
+    .catch(err => {
+        console.error("Error in selectFMR:", err);
+        // If there was an error, make sure to update the button state anyway
+        updateDisplayButtonState();
     });
 }
-
 
 function deselectFMR(fmr_id) {
     fetch("http://localhost:5000/deselect", {
@@ -79,7 +85,6 @@ function deselectFMR(fmr_id) {
         }
     });
 }
-
 
 function displaySelectedImages() {
     if (selectedIds.size === 0) {
@@ -118,7 +123,6 @@ function displaySelectedImages() {
         });
     });
 }
-
 
 function runProcessing(fmr_id) {
     const images = currentMatchingImages[fmr_id];
@@ -267,10 +271,30 @@ function updateFMRs() {
 
 function updateDisplayButtonState() {
     const btn = document.getElementById("displayImagesBtn");
+    
+    if (!btn) {
+        console.error("Display button not found!");
+        return;
+    }
 
     const hasImages = Array.from(selectedIds).some(fmr_id =>
         currentMatchingImages[fmr_id] && currentMatchingImages[fmr_id].length > 0
     );
 
+    console.log("Updating display button state:", {
+        selectedIds: Array.from(selectedIds),
+        hasImages: hasImages,
+        currentMatchingImages: currentMatchingImages
+    });
+
     btn.disabled = !hasImages;
+    
+    // Update button text to provide feedback
+    if (selectedIds.size === 0) {
+        btn.textContent = "Display Images";
+    } else if (hasImages) {
+        btn.textContent = "Display Images";
+    } else {
+        btn.textContent = "No Images Available";
+    }
 }

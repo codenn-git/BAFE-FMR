@@ -1,6 +1,6 @@
 ## removed get-matching-images function
 ## Available BSG images are now displayed in the popup
-## July 3, 11:27AM getDatabase() more efficient, display button not enabled when selecting FMRs
+## July 3, 10:22PM get_matching_images updated to accommodate the latest getDatabase() logic
 
 import sys
 import os
@@ -436,12 +436,26 @@ def get_matching_images():
         return jsonify({"status": "error", "message": "FMR database not found"}), 404
 
     fmr_database = pd.read_csv(fmr_db_file)
-    row = fmr_database[fmr_database["FMR"] == fmr_name]
-    if row.empty or pd.isna(row.iloc[0]["Image Path"]):
+    rows = fmr_database[fmr_database["FMR"] == fmr_name]
+    if rows.empty:
         return jsonify({"status": "error", "message": "No image found for FMR"}), 404
 
-    image_paths = row.iloc[0]["Image Path"].split(", ")
-    images = [{"filename": os.path.basename(p), "path": p} for p in image_paths if os.path.exists(p)]
+    images = []
+    for _, row in rows.iterrows():
+        # Prefer "Image Path" if present, else fallback to "BSG"
+        image_paths = []
+        if pd.notna(row.get("Image Path", None)) and row["Image Path"]:
+            image_paths = [p.strip() for p in str(row["Image Path"]).split(",") if p.strip()]
+        elif pd.notna(row.get("BSG", None)) and row["BSG"]:
+            image_paths = [row["BSG"]]
+
+        for p in image_paths:
+            if os.path.exists(p):
+                images.append({"filename": os.path.basename(p), "path": p})
+
+    if not images:
+        return jsonify({"status": "error", "message": "No valid image files found for FMR"}), 404
+
     return jsonify({"status": "success", "images": images})
 
 @app.route('/')
