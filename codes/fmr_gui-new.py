@@ -412,7 +412,7 @@ def create_image_preview(image_path, fmr_gdf):
 
         height, width = clipped_data.shape[1:]
         bounds = rasterio.transform.array_bounds(height, width, clipped_transform)  # (south, west, north, east)
-        transformer = Transformer.from_crs("EPSG:32651", "EPSG:4326", always_xy=True)
+        transformer = Transformer.from_crs("EPSG:4326", "EPSG:32651", always_xy=True)
         minx, miny = transformer.transform(bounds[1], bounds[0])
         maxx, maxy = transformer.transform(bounds[3], bounds[2])
         image_bounds = [[miny, minx], [maxy, maxx]]  # Leaflet uses [[south, west], [north, east]]
@@ -512,7 +512,7 @@ def update_fmr_route():
         updateFMRs(shapefile_path)
         getDatabase()
         global gdf, filtered_gdf
-        gdf = gpd.read_file(shapefile_path).to_crs(epsg=4326)
+        gdf = gpd.read_file(shapefile_path).to_crs(epsg=32651)
         filtered_gdf = gdf.copy()
         create_fmr_map(gdf)
         return jsonify({"status": "success", "message": "FMR updated successfully"})
@@ -618,7 +618,7 @@ def display_image():
     
     try:
         fmr_geometry = gdf.loc[fmr_id].geometry
-        fmr_gdf = gpd.GeoDataFrame({"geometry": [fmr_geometry]}, crs="EPSG:4326", index=[0])
+        fmr_gdf = gpd.GeoDataFrame({"geometry": [fmr_geometry]}, crs="EPSG:32651", index=[0])
         preview = create_image_preview(image_path, fmr_gdf)
         
         if preview:
