@@ -1,6 +1,6 @@
 ## removed get-matching-images function
 ## Available BSG images are now displayed in the popup
-## July 3, 10:22PM get_matching_images updated to accommodate the latest getDatabase() logic
+## July 4, 3:53PM Display button backend working
 
 import sys
 import os

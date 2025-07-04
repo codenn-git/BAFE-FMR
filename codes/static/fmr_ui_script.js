@@ -1,5 +1,5 @@
 // JavaScript logic for FMR GUI
-// July 3, 10:22PM fixed the display button
+// July 4, 3:53PM Display button working
 
 const selectedIds = new Set();
 const geoLayers = {};
