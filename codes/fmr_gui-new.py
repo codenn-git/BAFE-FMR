@@ -1,6 +1,6 @@
 ## removed get-matching-images function
 ## Available BSG images are now displayed in the popup
-## July 4, 3:53PM Display button backend working
+## July 7, 2:40PM updated getDatabase() ct drei
 
 import sys
 import os
@@ -284,7 +284,7 @@ def getDatabase():
                     formatted_date = ""
                     formatted_time = ""
 
-                # ✅ Skip duplicates before appending
+                # Skip duplicates before appending
                 if (fmr_name, tif_file, formatted_date) in existing_keys:
                     continue
 
@@ -300,7 +300,12 @@ def getDatabase():
                 })
 
         if not matched:
-            if (fmr_name, None, None) not in existing_keys:
+            # Check if this FMR already exists in DB with BSG=None
+            already_exists_blank = any(
+                (fmr_name == existing_fmr and pd.isna(existing_bsg))
+                for existing_fmr, existing_bsg, _ in existing_keys
+            )
+            if not already_exists_blank:
                 results.append({
                     "FMR": fmr_name,
                     "BSG": None,
@@ -314,6 +319,10 @@ def getDatabase():
 
     # === Part 3: Create DataFrame and sort ===
     results_df = pd.DataFrame(results)
+    
+    if results_df.empty:
+        print("No new FMR/BSG matches found. Skipping database update.")
+        return
 
     # Extract numeric index from FMR names (e.g., FMR_0, FMR_10 → 0, 10)
     results_df["FMR_INDEX"] = results_df["FMR"].str.extract(r"(\d+)", expand=False).astype(int)
