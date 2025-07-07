@@ -1,6 +1,6 @@
 ## removed get-matching-images function
 ## Available BSG images are now displayed in the popup
-## July 7, 2:40PM updated getDatabase() ct drei
+## July 7, 6:17 display image corrected (create_image_preview)
 
 import sys
 import os
@@ -77,8 +77,8 @@ def process_tracking(fmr_id, image_path, mode='automatic'):
         
         # Initialize preprocessing with the specific image and FMR geometry
         preprocessor = Preprocessing()
-        preprocessor.reproject(image_path, fmr_gdf)
-        clipped_data, clipped_transform = preprocessor.clipraster(buffer_dist=25, bbox=True)
+        preprocessor.reproject(image_path)
+        clipped_data, clipped_transform = preprocessor.clipraster(vector_data=fmr_gdf, buffer_dist=25, bbox=True)
         
         results = {
             'status': 'success',
@@ -228,8 +228,6 @@ def getDatabase():
     # Transformer from EPSG:4326 (raster bounds) to EPSG:32651 (FMR geometries)
     raster_to_fmr_crs = Transformer.from_crs("EPSG:4326", "EPSG:32651", always_xy=True)
 
-    preprocessing = Preprocessing()
-
     # Load existing DB (if exists)
     if os.path.exists(fmr_db_file):
         existing_df = pd.read_csv(fmr_db_file)
@@ -247,20 +245,15 @@ def getDatabase():
             continue
         tif_path = os.path.join(bsg_folder_path, tif_file)
         try:
-            _, _, _, bounds = preprocessing.reproject(tif_path)
-            raster_bounds_dict[tif_file]= {
-                "path": tif_path,
-                "bounds_geom": bounds
-            }
-            # with rasterio.open(tif_path) as src:
-            #     minx, miny, maxx, maxy = src.bounds
-            #     minx_t, miny_t = raster_to_fmr_crs.transform(minx, miny)
-            #     maxx_t, maxy_t = raster_to_fmr_crs.transform(maxx, maxy)
-            #     reprojected_bounds = box(minx_t, miny_t, maxx_t, maxy_t)
-            #     raster_bounds_dict[tif_file] = {
-            #         "path": tif_path,
-            #         "bounds_geom": reprojected_bounds
-            #     }
+            with rasterio.open(tif_path) as src:
+                minx, miny, maxx, maxy = src.bounds
+                minx_t, miny_t = raster_to_fmr_crs.transform(minx, miny)
+                maxx_t, maxy_t = raster_to_fmr_crs.transform(maxx, maxy)
+                reprojected_bounds = box(minx_t, miny_t, maxx_t, maxy_t)
+                raster_bounds_dict[tif_file] = {
+                    "path": tif_path,
+                    "bounds_geom": reprojected_bounds
+                }
         except Exception as e:
             print(f"Error reading {tif_file}: {e}")
             continue
@@ -291,7 +284,7 @@ def getDatabase():
                     formatted_date = ""
                     formatted_time = ""
 
-                # Skip duplicates before appending
+                # ✅ Skip duplicates before appending
                 if (fmr_name, tif_file, formatted_date) in existing_keys:
                     continue
 
@@ -323,6 +316,33 @@ def getDatabase():
                     "FMR Progress": "",
                     "Image Path": ""
                 })
+
+    # === Part 3: Create DataFrame and sort ===
+    results_df = pd.DataFrame(results)
+    
+    if results_df.empty:
+        print("No new FMR/BSG matches found. Skipping database update.")
+        return
+
+    # Extract numeric index from FMR names (e.g., FMR_0, FMR_10 → 0, 10)
+    results_df["FMR_INDEX"] = results_df["FMR"].str.extract(r"(\d+)", expand=False).astype(int)
+
+    # Ensure 'Date' is datetime for proper sorting
+    results_df["Date"] = pd.to_datetime(results_df["Date"], errors="coerce")
+
+    # === Part 4: Append and sort ===
+    if not existing_df.empty:
+        final_df = pd.concat([existing_df, results_df], ignore_index=True)
+    else:
+        final_df = results_df
+
+    final_df["FMR_INDEX"] = final_df["FMR"].str.extract(r"(\d+)", expand=False).astype(int)
+    final_df["Date"] = pd.to_datetime(final_df["Date"], errors="coerce")
+    final_df = final_df.sort_values(by=["FMR_INDEX", "Date"])
+    final_df = final_df.drop(columns=["FMR_INDEX"])
+
+    final_df.to_csv(fmr_db_file, index=False)
+    print(f"Done! FMR database saved to:\n{fmr_db_file}")
 
     # === Part 3: Create DataFrame and sort ===
     results_df = pd.DataFrame(results)
@@ -405,8 +425,8 @@ def create_image_preview(image_path, fmr_gdf):
         if fmr_gdf.crs != "EPSG:32651":
             fmr_gdf = fmr_gdf.to_crs("EPSG:32651")
 
-        preprocessor.reproject(image_path, fmr_gdf) #check back on this aina-july2
-        clipped_data, clipped_transform = preprocessor.clipraster(bbox=True)
+        preprocessor.reproject(image_path) #check back on this aina-july2
+        clipped_data, clipped_transform = preprocessor.clipraster(vector_data=fmr_gdf, bbox=True)
 
         if len(clipped_data.shape) == 3:
             if clipped_data.shape[0] >= 3:
