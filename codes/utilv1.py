@@ -30,9 +30,8 @@ class Preprocessing:
         self._clipped_data = None
         self._clipped_transform = None
 
-    def reproject(self, raster_path, vector_gdf,  target_crs="EPSG:32651", resampling=rasterio.enums.Resampling.nearest):
+    def reproject(self, raster_path, target_crs="EPSG:32651", resampling=rasterio.enums.Resampling.nearest):
         self.raster_path = raster_path
-        self.vector_gdf = vector_gdf
 
         if self.pneo:
             with rasterio.open(self.raster_path) as src:
@@ -40,14 +39,16 @@ class Preprocessing:
                     self._rep_data = vrt.read([1,2,3,4])
                     self._rep_trans = vrt.transform
                     self._rep_crs = vrt.crs
+                    bounds = vrt.bounds
         else:
             with rasterio.open(self.raster_path) as src:
                 with rasterio.vrt.WarpedVRT(src, crs=target_crs, resampling=rasterio.enums.Resampling.nearest) as vrt:
                     self._rep_data = vrt.read()
                     self._rep_trans = vrt.transform
                     self._rep_crs = vrt.crs
+                    bounds = vrt.bounds
 
-        return self._rep_data, self._rep_trans, self._rep_crs
+        return self._rep_data, self._rep_trans, self._rep_crs, bounds
 
     def clipraster(self, raster_data=None, vector_data=None, transform=None, buffer_dist = 15, bbox = False):
         '''Clip the raster data using input vector data. If no vector data is provided, output will be the whole image (reprojected image)
@@ -634,26 +635,30 @@ def stretch_band(band, lower_percent=2, upper_percent=98):
     stretched = np.clip((band - lower) / (upper - lower), 0, 1)
     return stretched
 
-def export(obj, output_path, obj_type):
+def export(obj, output_path, obj_type, crs, raster_transform=None):
     '''
     Export the GeoDataFrame to a shapefile.
         Args:
             obj: raster or vector (GeoDataFrame) object
             output_path: str, path to save the object
             obj_type: str, type of the object ('raster' or 'vector')
+            crs: str, crs
+            raster_transform: transform if obj_type is 'raster'
     '''
     if obj_type not in ['raster', 'vector']:
         raise ValueError("obj_type must be either 'raster' or 'vector'.")
-    
+            
     # Ensure the output folder exists
     output_folder = os.path.dirname(output_path)
     if not os.path.exists(output_folder):
         os.makedirs(output_folder)
 
     if obj_type == 'raster':
-        # For raster objects
+        if raster_transform is None:
+            raise ValueError("Exporting rasters need an input raster transform.")
+
         with rasterio.open(output_path, 'w', driver='GTiff', height=obj.shape[1], width=obj.shape[2],
-                           count=obj.shape[0], dtype=obj.dtype, crs=obj.crs, transform=obj.transform) as dst:
+                           count=obj.shape[0], dtype=obj.dtype, crs=crs, transform=raster_transform) as dst:
             for i in range(obj.shape[0]):
                 dst.write(obj[i], i + 1)
 
