@@ -211,7 +211,7 @@ def process_tracking(fmr_id, image_path, mode='automatic'):
 # Original Flask Routes
 # ==========================================================
 
-"""Scan FMR and BSG images, extracting match information and save results to 'fmr_database.csv'."""
+"""Scan FMR and BSG images, extracting match information and save results to 'fmr_database_aina.csv'."""
 # edit: if fmr_db_file exists, it shouldn't iterate over ALL the FMR features again.
 # Instead compare the existing FMRs with the new ones and only iterate over the new ones.
 
@@ -220,13 +220,15 @@ def getDatabase():
 
     master_fmr = shapefile_path
     bsg_folder_path = bsg_folder
-    fmr_db_file = os.path.join(os.path.dirname(master_fmr), "fmr_database.csv")
+    fmr_db_file = os.path.join(os.path.dirname(master_fmr), "fmr_database_aina.csv")
 
     # Load FMRs in EPSG:32651
     fmr_gdf = gpd.read_file(master_fmr).to_crs("EPSG:32651")
 
     # Transformer from EPSG:4326 (raster bounds) to EPSG:32651 (FMR geometries)
     raster_to_fmr_crs = Transformer.from_crs("EPSG:4326", "EPSG:32651", always_xy=True)
+
+    preprocessing = Preprocessing()
 
     # Load existing DB (if exists)
     if os.path.exists(fmr_db_file):
@@ -245,15 +247,20 @@ def getDatabase():
             continue
         tif_path = os.path.join(bsg_folder_path, tif_file)
         try:
-            with rasterio.open(tif_path) as src:
-                minx, miny, maxx, maxy = src.bounds
-                minx_t, miny_t = raster_to_fmr_crs.transform(minx, miny)
-                maxx_t, maxy_t = raster_to_fmr_crs.transform(maxx, maxy)
-                reprojected_bounds = box(minx_t, miny_t, maxx_t, maxy_t)
-                raster_bounds_dict[tif_file] = {
-                    "path": tif_path,
-                    "bounds_geom": reprojected_bounds
-                }
+            _, _, _, bounds = preprocessing.reproject(tif_path)
+            raster_bounds_dict[tif_file]= {
+                "path": tif_path,
+                "bounds_geom": bounds
+            }
+            # with rasterio.open(tif_path) as src:
+            #     minx, miny, maxx, maxy = src.bounds
+            #     minx_t, miny_t = raster_to_fmr_crs.transform(minx, miny)
+            #     maxx_t, maxy_t = raster_to_fmr_crs.transform(maxx, maxy)
+            #     reprojected_bounds = box(minx_t, miny_t, maxx_t, maxy_t)
+            #     raster_bounds_dict[tif_file] = {
+            #         "path": tif_path,
+            #         "bounds_geom": reprojected_bounds
+            #     }
         except Exception as e:
             print(f"Error reading {tif_file}: {e}")
             continue
@@ -394,21 +401,32 @@ def stretch_band(band, lower_percent=2, upper_percent=98):
 def create_image_preview(image_path, fmr_gdf):
     try:
         preprocessor = Preprocessing()
+
+        if fmr_gdf.crs != "EPSG:32651":
+            fmr_gdf = fmr_gdf.to_crs("EPSG:32651")
+
         preprocessor.reproject(image_path, fmr_gdf) #check back on this aina-july2
         clipped_data, clipped_transform = preprocessor.clipraster(bbox=True)
 
-        # Stretch RGB bands
-        rgb = np.stack([
-            stretch_band(clipped_data[0]),
-            stretch_band(clipped_data[1]),
-            stretch_band(clipped_data[2])
-        ], axis=-1)
+        if len(clipped_data.shape) == 3:
+            if clipped_data.shape[0] >= 3:
+                rgb = np.stack([
+                    stretch_band(clipped_data[0]),
+                    stretch_band(clipped_data[1]),
+                    stretch_band(clipped_data[2])
+                ], axis=-1)
+            else:
+                single_band = stretch_band(clipped_data[0])
+                rgb = np.stack([single_band, single_band, single_band], axis=-1)
+        else:
+            single_band = stretch_band(clipped_data)
+            rgb = np.stack([single_band, single_band, single_band], axis=-1)
 
         # Convert image to PNG
         fig, ax = plt.subplots(figsize=(6, 6), dpi=150)
         ax.imshow(rgb)
         ax.axis("off")
-
+        
         buf = BytesIO()
         plt.savefig(buf, format="png", bbox_inches='tight', pad_inches=0, transparent=True)
         plt.close(fig)
@@ -416,20 +434,33 @@ def create_image_preview(image_path, fmr_gdf):
 
         # Encode PNG to base64
         image_base64 = base64.b64encode(buf.read()).decode('utf-8')
+        
+        height, width = clipped_data.shape[-2:]  # Get height and width from last 2 dimensions
+        
+        # Get bounds in the image's CRS
+        bounds = rasterio.transform.array_bounds(height, width, clipped_transform)
+        
+        # Convert bounds from UTM (EPSG:32651) to WGS84 (EPSG:4326) for Leaflet
+        transformer = Transformer.from_crs("EPSG:32651", "EPSG:4326", always_xy=True)
+        
+        # Transform corners
+        minx_wgs, miny_wgs = transformer.transform(bounds[0], bounds[1])  # west, south
+        maxx_wgs, maxy_wgs = transformer.transform(bounds[2], bounds[3])  # east, north
 
-        # Get raster bounds in WGS84
-
-        height, width = clipped_data.shape[1:]
-        bounds = rasterio.transform.array_bounds(height, width, clipped_transform)  # (south, west, north, east)
-        transformer = Transformer.from_crs("EPSG:4326", "EPSG:32651", always_xy=True)
-        minx, miny = transformer.transform(bounds[1], bounds[0])
-        maxx, maxy = transformer.transform(bounds[3], bounds[2])
-        image_bounds = [[miny, minx], [maxy, maxx]]  # Leaflet uses [[south, west], [north, east]]
-
-        return {"base64": image_base64, "bounds": image_bounds}
-
+        image_bounds = [[miny_wgs, minx_wgs], [maxy_wgs, maxx_wgs]]
+        
+        # print(f"Image bounds (UTM): {bounds}")
+        # print(f"Image bounds (WGS84): {image_bounds}")
+        
+        return {
+            "base64": image_base64, 
+            "bounds": image_bounds
+        }
+        
     except Exception as e:
         print(f"Error creating preview: {e}")
+        import traceback
+        traceback.print_exc()
         return None
     
 ## ==========================================================
@@ -439,7 +470,7 @@ def get_matching_images():
     data = request.json
     fmr_id = data.get("fmr_id")
     fmr_name = str(gdf.loc[fmr_id].get("name", f"FMR_{fmr_id}"))
-    fmr_db_file = os.path.join(os.path.dirname(shapefile_path), "fmr_database.csv")
+    fmr_db_file = os.path.join(os.path.dirname(shapefile_path), "fmr_database_aina.csv")
 
     if not os.path.exists(fmr_db_file):
         return jsonify({"status": "error", "message": "FMR database not found"}), 404
@@ -625,16 +656,35 @@ def display_image():
     if not fmr_id or not image_path:
         return jsonify({"status": "error", "message": "Missing FMR ID or image path"}), 400
     
+    if not os.path.exists(image_path):
+        return jsonify({"status": "error", "message": f"Image file not found: {image_path}"}), 400
+
     try:
+        if fmr_id not in gdf.index:
+            return jsonify({"status": "error", "message": f"FMR ID {fmr_id} not found"}), 400
+        
         fmr_geometry = gdf.loc[fmr_id].geometry
-        fmr_gdf = gpd.GeoDataFrame({"geometry": [fmr_geometry]}, crs="EPSG:32651", index=[0])
+        
+        fmr_gdf = gpd.GeoDataFrame(
+            {"geometry": [fmr_geometry]}, 
+            crs=gdf.crs,
+            index=[0]
+        )
+        
+        if fmr_gdf.crs != "EPSG:32651":
+            fmr_gdf = fmr_gdf.to_crs("EPSG:32651")
+        
+        print(f"Processing FMR {fmr_id} with image {image_path}")
+        print(f"FMR geometry CRS: {fmr_gdf.crs}")
+        
+        # Create image preview
         preview = create_image_preview(image_path, fmr_gdf)
         
         if preview:
             return jsonify({
                 "status": "success",
                 "image_data": preview["base64"],
-                "bounds": preview["bounds"],  # [[south, west], [north, east]]
+                "bounds": preview["bounds"],
                 "fmr_id": fmr_id,
                 "image_path": image_path
             })
@@ -642,6 +692,9 @@ def display_image():
             return jsonify({"status": "error", "message": "Failed to create image preview"}), 500
             
     except Exception as e:
+        print(f"Error in display_image: {e}")
+        import traceback
+        traceback.print_exc()
         return jsonify({"status": "error", "message": str(e)}), 500
 
 
@@ -653,7 +706,7 @@ def process_fmr():
     image_path = data.get("image_path")
     workflow_type = data.get("workflow_type")  # 'track' or 'extract'
     workflow_options = data.get("workflow_options", {})
-    fmr_db_file = os.path.join(os.path.dirname(shapefile_path), "fmr_database.csv")
+    fmr_db_file = os.path.join(os.path.dirname(shapefile_path), "fmr_database_aina.csv")
 
     global selected_features, gdf
 
@@ -684,7 +737,7 @@ def process_fmr():
             mode = workflow_options.get('mode', 'automatic')  # 'automatic' or 'manual'
             results = process_tracking(fmr_id, image_path, mode)
 
-            # Update fmr_database.csv with new results
+            # Update fmr_database_aina.csv with new results
             if results.get('status') == 'success':
                 fmr_name = str(gdf.loc[fmr_id].get("name", f"FMR_{fmr_id}"))
                 if os.path.exists(fmr_db_file):
@@ -724,7 +777,7 @@ def create_fmr_map(input_gdf=None):
         return ""
 
     # Load FMR database to get BSG information
-    fmr_db_file = os.path.join(os.path.dirname(shapefile_path), "fmr_database.csv")
+    fmr_db_file = os.path.join(os.path.dirname(shapefile_path), "fmr_database_aina.csv")
     fmr_database = None
     if os.path.exists(fmr_db_file):
         try:
