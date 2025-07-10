@@ -1,6 +1,6 @@
 ## removed get-matching-images function
 ## Available BSG images are now displayed in the popup
-## July 7, 6:17 display image corrected (create_image_preview)
+## July 9, adapted new display route from andrei, though I retained the create_image_function for cleanliness
 
 import sys
 import os
@@ -20,8 +20,10 @@ from shapely.geometry import box
 from shapely.ops import transform as shapely_transform
 from pyproj import Transformer
 from datetime import datetime
+from PIL import Image
+from rasterio.transform import xy
 
-from PyQt5.QtWidgets import QApplication, QMainWindow, QVBoxLayout, QWidget, QInputDialog
+from PyQt5.QtWidgets import QApplication, QMainWindow, QVBoxLayout, QWidget
 from PyQt5.QtWebEngineWidgets import QWebEngineView
 from PyQt5.QtCore import QUrl
 from flask import Flask, jsonify, request, send_file
@@ -421,67 +423,40 @@ def stretch_band(band, lower_percent=2, upper_percent=98):
 def create_image_preview(image_path, fmr_gdf):
     try:
         preprocessor = Preprocessing()
-
-        if fmr_gdf.crs != "EPSG:32651":
-            fmr_gdf = fmr_gdf.to_crs("EPSG:32651")
-
-        preprocessor.reproject(image_path) #check back on this aina-july2
+        _,_, rep_crs, _ = preprocessor.reproject(image_path)
         clipped_data, clipped_transform = preprocessor.clipraster(vector_data=fmr_gdf, bbox=True)
-
-        if len(clipped_data.shape) == 3:
-            if clipped_data.shape[0] >= 3:
-                rgb = np.stack([
-                    stretch_band(clipped_data[0]),
-                    stretch_band(clipped_data[1]),
-                    stretch_band(clipped_data[2])
-                ], axis=-1)
-            else:
-                single_band = stretch_band(clipped_data[0])
-                rgb = np.stack([single_band, single_band, single_band], axis=-1)
-        else:
-            single_band = stretch_band(clipped_data)
-            rgb = np.stack([single_band, single_band, single_band], axis=-1)
-
-        # Convert image to PNG
-        fig, ax = plt.subplots(figsize=(6, 6), dpi=150)
-        ax.imshow(rgb)
-        ax.axis("off")
         
+        height, width = clipped_data.shape[1:]
+        top_left = xy(clipped_transform, 1, 0, offset='ul')  # Upper-left corner
+        bottom_right = xy(clipped_transform, height - 1, width - 1, offset='lr')  # Lower-right corner
+
+        transformer = Transformer.from_crs(rep_crs, "EPSG:4326", always_xy=True)
+        minx, miny = transformer.transform(*top_left)
+        maxx, maxy = transformer.transform(*bottom_right)
+
+        image_bounds = [[miny, minx], [maxy, maxx]]
+        
+        rgb = np.stack([
+            np.clip(clipped_data[0], 0, 255) / 255,
+            np.clip(clipped_data[1], 0, 255) / 255,
+            np.clip(clipped_data[2], 0, 255) / 255
+        ], axis=-1)
+
+        rgb_uint8 = (rgb * 255).astype(np.uint8)
+        image = Image.fromarray(rgb_uint8)
         buf = BytesIO()
-        plt.savefig(buf, format="png", bbox_inches='tight', pad_inches=0, transparent=True)
-        plt.close(fig)
+        image.save(buf, format="PNG")
         buf.seek(0)
 
-        # Encode PNG to base64
         image_base64 = base64.b64encode(buf.read()).decode('utf-8')
-        
-        height, width = clipped_data.shape[-2:]  # Get height and width from last 2 dimensions
-        
-        # Get bounds in the image's CRS
-        bounds = rasterio.transform.array_bounds(height, width, clipped_transform)
-        
-        # Convert bounds from UTM (EPSG:32651) to WGS84 (EPSG:4326) for Leaflet
-        transformer = Transformer.from_crs("EPSG:32651", "EPSG:4326", always_xy=True)
-        
-        # Transform corners
-        minx_wgs, miny_wgs = transformer.transform(bounds[0], bounds[1])  # west, south
-        maxx_wgs, maxy_wgs = transformer.transform(bounds[2], bounds[3])  # east, north
 
-        image_bounds = [[miny_wgs, minx_wgs], [maxy_wgs, maxx_wgs]]
-        
-        # print(f"Image bounds (UTM): {bounds}")
-        # print(f"Image bounds (WGS84): {image_bounds}")
-        
         return {
             "base64": image_base64, 
             "bounds": image_bounds
         }
         
     except Exception as e:
-        print(f"Error creating preview: {e}")
-        import traceback
-        traceback.print_exc()
-        return None
+        return jsonify({"status": "error", "message": str(e)}), 500
     
 ## ==========================================================
 
@@ -685,15 +660,8 @@ def display_image():
         
         fmr_geometry = gdf.loc[fmr_id].geometry
         
-        fmr_gdf = gpd.GeoDataFrame(
-            {"geometry": [fmr_geometry]}, 
-            crs=gdf.crs,
-            index=[0]
-        )
-        
-        if fmr_gdf.crs != "EPSG:32651":
-            fmr_gdf = fmr_gdf.to_crs("EPSG:32651")
-        
+        fmr_gdf = gpd.GeoDataFrame({"geometry": [fmr_geometry]}, crs="EPSG:4326")
+          
         print(f"Processing FMR {fmr_id} with image {image_path}")
         print(f"FMR geometry CRS: {fmr_gdf.crs}")
         

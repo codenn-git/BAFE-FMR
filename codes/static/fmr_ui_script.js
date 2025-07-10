@@ -1,5 +1,5 @@
 // JavaScript logic for FMR GUI
-// July 4, 3:53PM Display button working
+// July 9, adapted new display route from andrei, though I retained the create_image_function for cleanliness
 
 const selectedIds = new Set();
 const geoLayers = {};
