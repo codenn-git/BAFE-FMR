@@ -16,6 +16,7 @@ from shapely.geometry import box
 from shapely.ops import transform as shapely_transform
 from pyproj import Transformer
 from datetime import datetime
+from rasterio.transform import xy  # Make sure this is imported at the top
 
 from PyQt5.QtWidgets import QApplication, QMainWindow, QVBoxLayout, QWidget, QInputDialog
 from PyQt5.QtWebEngineWidgets import QWebEngineView
@@ -633,46 +634,29 @@ def display_selected_image():
         return jsonify({"status": "error", "message": "Image file not found."}), 404
 
     try:
+        if fmr_id not in gdf.index:
+            return jsonify({"status": "error", "message": f"FMR ID {fmr_id} not found"}), 400
+        
         fmr_geometry = gdf.loc[fmr_id].geometry
+        
         fmr_gdf = gpd.GeoDataFrame({"geometry": [fmr_geometry]}, crs="EPSG:4326")
+          
+        print(f"Processing FMR {fmr_id} with image {image_path}")
+        print(f"FMR geometry CRS: {fmr_gdf.crs}")
+        
+        preview = create_image_preview(image_path, fmr_gdf)
 
-        preprocessor = Preprocessing()
-        rep_data, rep_transform, rep_crs = preprocessor.reproject(image_path, fmr_gdf)
-        clipped_data, clipped_transform = preprocessor.clipraster(bbox=True)
-
-        from rasterio.transform import xy  # Make sure this is imported at the top
-
-        height, width = clipped_data.shape[1:]
-        top_left = xy(clipped_transform, 1, 0, offset='ul')  # Upper-left corner
-        bottom_right = xy(clipped_transform, height - 1, width - 1, offset='lr')  # Lower-right corner
-
-        transformer = Transformer.from_crs(rep_crs, "EPSG:4326", always_xy=True)
-        minx, miny = transformer.transform(*top_left)
-        maxx, maxy = transformer.transform(*bottom_right)
-
-        image_bounds = [[miny, minx], [maxy, maxx]]
-
-        # ✅ Encode RGB visualization to PNG at native resolution
-        from PIL import Image
-        rgb = np.stack([
-            np.clip(clipped_data[0], 0, 255) / 255,
-            np.clip(clipped_data[1], 0, 255) / 255,
-            np.clip(clipped_data[2], 0, 255) / 255
-        ], axis=-1)
-
-        rgb_uint8 = (rgb * 255).astype(np.uint8)
-        image = Image.fromarray(rgb_uint8)
-        buf = BytesIO()
-        image.save(buf, format="PNG")
-        buf.seek(0)
-
-        image_base64 = base64.b64encode(buf.read()).decode('utf-8')
-
-        return jsonify({
-            "status": "success",
-            "image_base64": image_base64,
-            "image_bounds": image_bounds
-        })
+         if preview:
+            return jsonify({
+                "status": "success",
+                "image_data": preview["base64"],
+                "bounds": preview["bounds"],
+                "fmr_id": fmr_id,
+                "image_path": image_path
+            })
+        else:
+            return jsonify({"status": "error", "message": "Failed to create image preview"}), 500
+            
     except Exception as e:
         return jsonify({"status": "error", "message": str(e)}), 500
 
