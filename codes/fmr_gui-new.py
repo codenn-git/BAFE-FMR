@@ -243,50 +243,41 @@ def stretch_band(band, lower_percent=2, upper_percent=98):
 def create_image_preview(image_path, fmr_gdf):
     try:
         preprocessor = Preprocessing()
-        rep_data, rep_transform, rep_crs = preprocessor.reproject(image_path, fmr_gdf)
+        _,_, rep_crs, _ = preprocessor.reproject(image_path)
+        clipped_data, clipped_transform = preprocessor.clipraster(vector_data=fmr_gdf, bbox=True)
+        
+        height, width = clipped_data.shape[1:]
+        top_left = xy(clipped_transform, 1, 0, offset='ul')  # Upper-left corner
+        bottom_right = xy(clipped_transform, height - 1, width - 1, offset='lr')  # Lower-right corner
 
-        # ✅ Reproject the vector to match the raster CRS
-        reprojected_vector = fmr_gdf.to_crs(rep_crs)
+        transformer = Transformer.from_crs(rep_crs, "EPSG:4326", always_xy=True)
+        minx, miny = transformer.transform(*top_left)
+        maxx, maxy = transformer.transform(*bottom_right)
 
-        with rasterio.open(image_path) as src:
-            clipped_data, clipped_transform = rasterio.mask.mask(
-                src,
-                reprojected_vector.geometry,
-                crop=True
-            )
-
-        # ✅ Stretch RGB bands for visualization
+        image_bounds = [[miny, minx], [maxy, maxx]]
+        
         rgb = np.stack([
-            stretch_band(clipped_data[0]),
-            stretch_band(clipped_data[1]),
-            stretch_band(clipped_data[2])
+            np.clip(clipped_data[0], 0, 255) / 255,
+            np.clip(clipped_data[1], 0, 255) / 255,
+            np.clip(clipped_data[2], 0, 255) / 255
         ], axis=-1)
 
-        fig, ax = plt.subplots(figsize=(6, 6), dpi=150)
-        ax.imshow(rgb)
-        ax.axis("off")
-
+        rgb_uint8 = (rgb * 255).astype(np.uint8)
+        image = Image.fromarray(rgb_uint8)
         buf = BytesIO()
-        plt.savefig(buf, format="png", bbox_inches='tight', pad_inches=0, transparent=True)
-        plt.close(fig)
+        image.save(buf, format="PNG")
         buf.seek(0)
 
         image_base64 = base64.b64encode(buf.read()).decode('utf-8')
 
-        # ✅ Transform clipped raster bounds to WGS84 for Leaflet
-        height, width = clipped_data.shape[1:]
-        bounds = rasterio.transform.array_bounds(height, width, clipped_transform)
-        transformer = Transformer.from_crs(rep_crs, "EPSG:4326", always_xy=True)
-        minx, miny = transformer.transform(bounds[0], bounds[1])
-        maxx, maxy = transformer.transform(bounds[2], bounds[3])
-        image_bounds = [[miny, minx], [maxy, maxx]]
-
-        return {"base64": image_base64, "bounds": image_bounds}
-
+        return {
+            "base64": image_base64, 
+            "bounds": image_bounds
+        }
+        
     except Exception as e:
-        print(f"Error creating preview: {e}")
-        return None
-
+        return jsonify({"status": "error", "message": str(e)}), 500
+    
 ## ==========================================================
 
 @app.route('/get_matching_images', methods=['POST'])
