@@ -49,160 +49,7 @@ filtered_gdf = gdf.copy()
 
 # ==========================================================
 # Processing Functions
-
-def process_tracking(fmr_id, image_path, mode='automatic'):
-    """Process FMR tracking (adapted from your tracking workflow)"""
-    try:
-        # Get the FMR feature using the FMR_ID
-        if fmr_id not in gdf.index:
-            return {
-                'status': 'error',
-                'message': f'FMR ID {fmr_id} not found in shapefile'
-            }
-        
-        # Get the FMR geometry from the GeoDataFrame
-        fmr_geometry = gdf.loc[fmr_id].geometry
-        fmr_gdf = gpd.GeoDataFrame({'geometry': fmr_geometry}, crs=gdf.crs)
-        fmr_name = str(gdf.loc[fmr_id].get("name", f"FMR_{fmr_id}"))
-        
-        # Validate image path exists
-        if not os.path.exists(image_path):
-            return {
-                'status': 'error',
-                'message': f'Image file not found: {image_path}'
-            }
-        
-        # Initialize preprocessing with the specific image and FMR geometry
-        preprocessor = Preprocessing()
-        preprocessor.reproject(image_path, fmr_gdf)
-        clipped_data, clipped_transform = preprocessor.clipraster(buffer_dist=25, bbox=True)
-        
-        results = {
-            'status': 'success',
-            'fmr_id': fmr_id,
-            'fmr_name': fmr_name,
-            'mode': mode,
-            'image_path': image_path,
-            'message': f'Tracking completed for {fmr_name} in {mode} mode'
-        }
-        
-        if mode == 'automatic':
-            # Apply your automatic processing pipeline
-            filter = Filters()
-            warm_raster = filter.enhance_image_warmth(clipped_data)
-            stretch_raster = filter.enhance_linear_stretch(clipped_data)
-
-            morph = Morph()
-            morph_warm = morph.process(warm_raster)
-            morph_stretch = morph.process(stretch_raster)                                                                  
-
-            # Merges the applied morphed warmth and stretch function
-            final_binary_raster = np.logical_or(morph_warm, morph_stretch)
-            final_binary_raster = cv2.morphologyEx(final_binary_raster.astype(np.uint8), 
-                                                   cv2.MORPH_CLOSE, np.ones((3,3), np.uint8), iterations=3)
-
-            final_clipped_data, final_clipped_transform = preprocessor.clipraster(
-                                    raster_data=final_binary_raster.astype(np.uint8),
-                                    transform=clipped_transform,
-                                    buffer_dist=1)
-            
-            final_line = measure_line(final_clipped_data, final_clipped_transform, spacing=3)
-            
-            if final_line is not None and not final_line.empty:
-                final_line_length = final_line.length.values[0]
-                vector_length = fmr_geometry.length
-                
-                results['Current FMR Length'] = float(final_line_length)
-                results['vector_length'] = float(vector_length)
-                results['FMR progress'] = float((final_line_length / vector_length) * 100)
-            else:
-                results['Current FMR Length'] = None
-                results['FMR progress'] = None
-                results['message'] += ' - No road line detected'
-            
-        elif mode == 'manual':
-            # Set up for manual interaction
-            interaction = Interaction(clipped_data, fmr_gdf)
-            results['message'] = f'Manual tracking mode initialized for {fmr_name}'
-            results['requires_interaction'] = True
-        
-        return results
-        
-    except Exception as e:
-        return {
-            'status': 'error',
-            'fmr_id': fmr_id if 'fmr_id' in locals() else None,
-            'message': f'Error in tracking: {str(e)}'
-        }
-        
-    except Exception as e:
-        return {
-            'status': 'error',
-            'message': f'Error in tracking: {str(e)}'
-        }
-
-# def process_extraction(image_path, fmr_geometry, image_type='BSG'):
-#     """Process road width extraction (adapted from your extraction workflow)"""
-#     try:
-#         # This would use your processing pipeline
-#         preprocessor = Preprocessing()
-#         preprocessor.reproject(image_path, fmr_geometry)
-        
-#         results = {
-#             'status': 'success',
-#             'image_type': image_type,
-#             'message': f'Width extraction completed for {image_type} image'
-#         }
-        
-#         if image_type == 'PNEO':
-#             # Apply PNEO-specific processing
-#             # int, tol, res = 3, 0.15, 0.3
-#             # clipped_data, clipped_transform = preprocessor.clipraster(bbox=True)
-#             # filter = Filters(clipped_data)
-#             # cielab = filter.cielab()
-#             # ... rest of PNEO processing
-            
-#             results['mean_width'] = 'PNEO width calculation would go here'
-            
-#         elif image_type == 'BSG':
-#             # Apply BSG-specific processing
-#             int, tol, res = 3, 0.4, 0.3
-#             raster_data, _ = preprocessor.clipraster(bbox=True)
-#             clipped_data, clipped_transform = preprocessor.clipraster(buffer_dist=25)
-
-#             #Filters: warmth and linear stretch
-#             filter = Filters() #NEW: filter = Filters()
-#             warm_raster = filter.enhance_image_warmth(clipped_data) #NEW: warm_raster  = filter.enhance_image_warmth(clipped_data)
-#             stretch_raster = filter.enhance_linear_stretch(clipped_data)  #NEW: warm_raster  = filter.enhance_linear_stretch(clipped_data)
-
-#             #Apply Morphological Operations
-#             morph = Morph()
-#             morph_warm = morph.process(warm_raster)
-#             morph_stretch = morph.process(stretch_raster)
-
-#             #merges the applied morphed warmth and stretch function
-#             merged_or = np.logical_or(morph_warm, morph_stretch)
-#             initial_binary_raster = merged_or
-
-#             final_binary_transform = clipped_transform
- 
-#             # plt.imshow(final_clipped_data, cmap="gray")
-#             final_binary_raster = morph.remove_small_islands(initial_binary_raster, min_size=1000)
-#             final_binary_raster = cv2.morphologyEx(final_binary_raster.astype(np.uint8), 
-#                                                    cv2.MORPH_CLOSE, np.ones((3,3), np.uint8), iterations=3)
-
-#             measure = MeasureWidth(final_binary_raster, final_binary_transform, fmr_geometry)
-#             measure.process(int=int, tol=tol, res=res)
-
-#             results['mean_width'] = measure.clipped_transects['width'].mean()
-        
-#         return results
-        
-#     except Exception as e:
-#         return {
-#             'status': 'error',
-#             'message': f'Error in extraction: {str(e)}'
-#         }
+# not yet finished, care of aina
 
 # ==========================================================
 # Original Flask Routes
@@ -624,14 +471,17 @@ def export_selected():
 # New Processing Routes
 # ==========================================================
 
-@app.route('/display_selected_image', methods=['POST'])
-def display_selected_image():
-    data = request.get_json()
+@app.route('/display_image', methods=['POST'])
+def display_image():
+    data = request.json
     fmr_id = data.get("fmr_id")
     image_path = data.get("image_path")
-
+    
+    if not fmr_id or not image_path:
+        return jsonify({"status": "error", "message": "Missing FMR ID or image path"}), 400
+    
     if not os.path.exists(image_path):
-        return jsonify({"status": "error", "message": "Image file not found."}), 404
+        return jsonify({"status": "error", "message": f"Image file not found: {image_path}"}), 400
 
     try:
         if fmr_id not in gdf.index:
@@ -644,9 +494,10 @@ def display_selected_image():
         print(f"Processing FMR {fmr_id} with image {image_path}")
         print(f"FMR geometry CRS: {fmr_gdf.crs}")
         
+        # Create image preview
         preview = create_image_preview(image_path, fmr_gdf)
-
-         if preview:
+        
+        if preview:
             return jsonify({
                 "status": "success",
                 "image_data": preview["base64"],
@@ -658,6 +509,9 @@ def display_selected_image():
             return jsonify({"status": "error", "message": "Failed to create image preview"}), 500
             
     except Exception as e:
+        print(f"Error in display_image: {e}")
+        import traceback
+        traceback.print_exc()
         return jsonify({"status": "error", "message": str(e)}), 500
 
 @app.route('/process_fmr', methods=['POST'])
@@ -666,14 +520,24 @@ def process_fmr():
     data = request.json
     fmr_id = data.get("fmr_id")
     image_path = data.get("image_path")
-    workflow_type = data.get("workflow_type")  # 'track' or 'extract'
-    workflow_options = data.get("workflow_options", {})
-    fmr_db_file = os.path.join(os.path.dirname(shapefile_path), "fmr_database.csv")
+    workflow_type = data.get("workflow_type") # manual or automatic
+    image_type = data.get("image_type")  
+    fmr_db_file = os.path.join(os.path.dirname(shapefile_path), "fmr_database_aina.csv")
 
     global selected_features, gdf
 
-    if not all([fmr_id is not None, image_path, workflow_type]):
-        return jsonify({"status": "error", "message": "Missing required parameters"}), 400
+    if fmr_id is None or image_path is None or workflow_type is None:
+        missing = []
+        if fmr_id is None:
+            missing.append("fmr_id")
+        if not image_path:
+            missing.append("image_path")
+        if not workflow_type:
+            missing.append("workflow_type")
+        return jsonify({
+            "status": "error",
+            "message": f"Missing required parameter(s): {', '.join(missing)}"
+        }), 400
     
     try:
         # Validate that the FMR_ID is in selected_features
@@ -681,48 +545,112 @@ def process_fmr():
             return jsonify({"status": "error", "message": f"FMR ID {fmr_id} is not selected"}), 400
         
         # Get image path from FMR database if not provided or validate existing path
-        if not image_path or not os.path.exists(image_path):
+        if not image_path:
+            # Try to recover image path from database if missing
             if os.path.exists(fmr_db_file):
                 fmr_database = pd.read_csv(fmr_db_file)
                 fmr_name = str(gdf.loc[fmr_id].get("name", f"FMR_{fmr_id}"))
                 fmr_entry = fmr_database[fmr_database["FMR"] == fmr_name]
-                if not fmr_entry.empty:
-                    # Prefer Image Path if it exists
-                    image_path_field = fmr_entry.iloc[0].get("Image Path", "")
-                    if pd.notna(image_path_field):
-                        paths = [p.strip() for p in image_path_field.split(",") if os.path.exists(p.strip())]
-                        if paths:
-                            image_path = paths[0]
+                if not fmr_entry.empty and pd.notna(fmr_entry.iloc[0].get("Image Path")):
+                    image_paths = fmr_entry.iloc[0]["Image Path"].split(", ")
+                    if image_paths:
+                        image_path = image_paths[0]  # Use first available image
 
-        
-        if workflow_type == 'track':
-            mode = workflow_options.get('mode', 'automatic')  # 'automatic' or 'manual'
-            results = process_tracking(fmr_id, image_path, mode)
+            if not image_path or not os.path.exists(image_path):
+                return jsonify({"status": "error", "message": "No valid image path found for this FMR"}), 400
 
-            # Update fmr_database.csv with new results
-            if results.get('status') == 'success':
-                fmr_name = str(gdf.loc[fmr_id].get("name", f"FMR_{fmr_id}"))
-                if os.path.exists(fmr_db_file):
-                    fmr_database = pd.read_csv(fmr_db_file)
-                    row_idx = fmr_database.index[fmr_database["FMR"] == fmr_name].tolist()
-                    if row_idx:
-                        idx = row_idx[0]
-                        if "Current FMR Length" in fmr_database.columns and results.get("Current FMR Length") is not None:
-                            fmr_database.at[idx, "Current FMR Length"] = results.get("Current FMR Length")
-                        if "FMR Progress" in fmr_database.columns and results.get("FMR progress") is not None:
-                            fmr_database.at[idx, "FMR Progress"] = results.get("FMR progress")
-                        fmr_database.to_csv(fmr_db_file, index=False)
+        elif not os.path.exists(image_path):
+            # Provided image_path is invalid
+            return jsonify({"status": "error", "message": "Provided image path does not exist"}), 400
 
-        # deal with this extraction workflow later  
-        # elif workflow_type == 'extract':
-        #     image_type = workflow_options.get('image_type', 'BSG')  # 'BSG' or 'PNEO'
-        #     results = process_extraction(fmr_id, image_path, image_type)
-            
+        if workflow_type == 'manual':
+            fmr_gdf = drawn_fmr #need to call this from the gui, to edit once the draw function is completed
+            image_type = 'BSG'
+
+        elif workflow_type == 'automatic':
+            fmr_gdf = fmr_gdf.loc[fmr_id].geometry
+            image_type = image_type
+
         else:
             return jsonify({"status": "error", "message": "Invalid workflow type"}), 400
+
+        results = processing(fmr_gdf, image_path, image_type)
         
         return jsonify(results)
         
+    except Exception as e:
+        return jsonify({"status": "error", "message": str(e)}), 500
+
+## processing function
+def processing(vector_gdf, raster_path, image_type):
+    results = {}
+    raster_directory = os.path.dirname(raster_path)
+    master_directory = os.path.dirname(raster_directory)
+    output_folder = os.path.dirname(os.path.dirname(raster_path))
+
+    try:
+        preprocessor = Preprocessing()
+        preprocessor.reproject(raster_path)
+        
+        if image_type == 'BSG':
+            preprocessor.reproject(raster_path)
+
+            clipped_data, clipped_transform = preprocessor.clipraster(vector_data=vector_gdf, buffer_dist=25) #bbox=False
+
+            filter = Filters()
+            warm_raster = filter.enhance_image_warmth(clipped_data)
+            stretch_raster = filter.enhance_linear_stretch(clipped_data)
+
+            morph = Morph()
+            morph_warm = morph.process(warm_raster)
+            morph_stretch = morph.process(stretch_raster)
+
+            merged_or = np.logical_or(morph_warm, morph_stretch)
+            initial_binary_raster = merged_or
+
+        if image_type == 'PNEO':
+            int, tol, res = 3, 0.15, 0.3 
+            clipped_data, clipped_transform = preprocessor.clipraster(vector_data=vector_gdf, bbox=True)
+
+            filter = Filters()
+            cielab = filter.cielab(clipped_data)
+            
+            morph = Morph()
+            initial_binary_raster = morph.threshold_cielab(cielab)
+
+        final_binary_transform = clipped_transform
+
+        # plt.imshow(final_clipped_data, cmap="gray")
+        final_binary_raster = morph.remove_small_islands(initial_binary_raster, min_size=1000)
+        final_binary_raster = cv2.morphologyEx(final_binary_raster.astype(np.uint8), cv2.MORPH_CLOSE, np.ones((3,3), np.uint8), iterations=3)
+
+        measure = MeasureWidth(final_binary_raster, final_binary_transform, vector_gdf)
+        transects = measure.process(int=int, tol=tol, res=res)
+        road_polygon = measure.generate_polygon() #export??
+    
+
+        final_line = measure_line(final_binary_raster, final_binary_transform, spacing=3)
+
+        if final_line is not None and not final_line.empty:
+            final_line_length = final_line.length.values[0]
+            vector_length = vector_gdf.geometry.length
+            
+            results['Actual Length'] = float(final_line_length)
+            results['Planned Length'] = float(vector_length)
+            results['FMR progress'] = float((final_line_length / vector_length) * 100)
+            results['Average Road Width'] = float(transects['width'].mean())
+
+        else:
+            results['Actual Length'] = None
+            results['Planned Length'] = None
+            results['FMR Progress'] = None
+            results['Average Road Width'] = None
+            results['message'] += ' - No road line detected'
+
+        #add export lines here later 
+
+        return results
+    
     except Exception as e:
         return jsonify({"status": "error", "message": str(e)}), 500
 
