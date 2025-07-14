@@ -692,14 +692,24 @@ def process_fmr():
     data = request.json
     fmr_id = data.get("fmr_id")
     image_path = data.get("image_path")
-    workflow_type = data.get("workflow_type")  # 'track' or 'extract'
-    workflow_options = data.get("workflow_options", {})
+    workflow_type = data.get("workflow_type") # manual or automatic
+    image_type = data.get("image_type")  
     fmr_db_file = os.path.join(os.path.dirname(shapefile_path), "fmr_database_aina.csv")
 
     global selected_features, gdf
 
-    if not all([fmr_id is not None, image_path, workflow_type]):
-        return jsonify({"status": "error", "message": "Missing required parameters"}), 400
+    if fmr_id is None or image_path is None or workflow_type is None:
+        missing = []
+        if fmr_id is None:
+            missing.append("fmr_id")
+        if not image_path:
+            missing.append("image_path")
+        if not workflow_type:
+            missing.append("workflow_type")
+        return jsonify({
+            "status": "error",
+            "message": f"Missing required parameter(s): {', '.join(missing)}"
+        }), 400
     
     try:
         # Validate that the FMR_ID is in selected_features
@@ -707,8 +717,8 @@ def process_fmr():
             return jsonify({"status": "error", "message": f"FMR ID {fmr_id} is not selected"}), 400
         
         # Get image path from FMR database if not provided or validate existing path
-        if not image_path or not os.path.exists(image_path):
-            
+        if not image_path:
+            # Try to recover image path from database if missing
             if os.path.exists(fmr_db_file):
                 fmr_database = pd.read_csv(fmr_db_file)
                 fmr_name = str(gdf.loc[fmr_id].get("name", f"FMR_{fmr_id}"))
@@ -717,41 +727,104 @@ def process_fmr():
                     image_paths = fmr_entry.iloc[0]["Image Path"].split(", ")
                     if image_paths:
                         image_path = image_paths[0]  # Use first available image
-                
+
             if not image_path or not os.path.exists(image_path):
                 return jsonify({"status": "error", "message": "No valid image path found for this FMR"}), 400
-        
-        if workflow_type == 'track':
-            mode = workflow_options.get('mode', 'automatic')  # 'automatic' or 'manual'
-            results = process_tracking(fmr_id, image_path, mode)
 
-            # Update fmr_database_aina.csv with new results
-            if results.get('status') == 'success':
-                fmr_name = str(gdf.loc[fmr_id].get("name", f"FMR_{fmr_id}"))
-                if os.path.exists(fmr_db_file):
-                    fmr_database = pd.read_csv(fmr_db_file)
-                    row_idx = fmr_database.index[fmr_database["FMR"] == fmr_name].tolist()
-                    if row_idx:
-                        idx = row_idx[0]
-                        if "Current FMR Length" in fmr_database.columns and results.get("Current FMR Length") is not None:
-                            fmr_database.at[idx, "Current FMR Length"] = results.get("Current FMR Length")
-                        if "FMR Progress" in fmr_database.columns and results.get("FMR progress") is not None:
-                            fmr_database.at[idx, "FMR Progress"] = results.get("FMR progress")
-                        fmr_database.to_csv(fmr_db_file, index=False)
+        elif not os.path.exists(image_path):
+            # Provided image_path is invalid
+            return jsonify({"status": "error", "message": "Provided image path does not exist"}), 400
 
-        # deal with this extraction workflow later  
-        # elif workflow_type == 'extract':
-        #     image_type = workflow_options.get('image_type', 'BSG')  # 'BSG' or 'PNEO'
-        #     results = process_extraction(fmr_id, image_path, image_type)
-            
+        if workflow_type == 'manual':
+            fmr_gdf = drawn_fmr #need to call this from the gui, to edit once the draw function is completed
+            image_type = 'BSG'
+
+        elif workflow_type == 'automatic':
+            fmr_gdf = fmr_gdf.loc[fmr_id].geometry
+            image_type = image_type
+
         else:
             return jsonify({"status": "error", "message": "Invalid workflow type"}), 400
+
+        results = processing(fmr_gdf, image_path, image_type)
         
         return jsonify(results)
         
     except Exception as e:
         return jsonify({"status": "error", "message": str(e)}), 500
 
+## processing function
+def processing(vector_gdf, raster_path, image_type):
+    results = {}
+    raster_directory = os.path.dirname(raster_path)
+    master_directory = os.path.dirname(raster_directory)
+    output_folder = os.path.dirname(os.path.dirname(raster_path))
+
+    try:
+        preprocessor = Preprocessing()
+        preprocessor.reproject(raster_path)
+        
+        if image_type == 'BSG':
+            preprocessor.reproject(raster_path)
+
+            clipped_data, clipped_transform = preprocessor.clipraster(vector_data=vector_gdf, buffer_dist=25) #bbox=False
+
+            filter = Filters()
+            warm_raster = filter.enhance_image_warmth(clipped_data)
+            stretch_raster = filter.enhance_linear_stretch(clipped_data)
+
+            morph = Morph()
+            morph_warm = morph.process(warm_raster)
+            morph_stretch = morph.process(stretch_raster)
+
+            merged_or = np.logical_or(morph_warm, morph_stretch)
+            initial_binary_raster = merged_or
+
+        if image_type == 'PNEO':
+            int, tol, res = 3, 0.15, 0.3 
+            clipped_data, clipped_transform = preprocessor.clipraster(vector_data=vector_gdf, bbox=True)
+
+            filter = Filters()
+            cielab = filter.cielab(clipped_data)
+            
+            morph = Morph()
+            initial_binary_raster = morph.threshold_cielab(cielab)
+
+        final_binary_transform = clipped_transform
+
+        # plt.imshow(final_clipped_data, cmap="gray")
+        final_binary_raster = morph.remove_small_islands(initial_binary_raster, min_size=1000)
+        final_binary_raster = cv2.morphologyEx(final_binary_raster.astype(np.uint8), cv2.MORPH_CLOSE, np.ones((3,3), np.uint8), iterations=3)
+
+        measure = MeasureWidth(final_binary_raster, final_binary_transform, vector_gdf)
+        transects = measure.process(int=int, tol=tol, res=res)
+        road_polygon = measure.generate_polygon() #export??
+    
+
+        final_line = measure_line(final_binary_raster, final_binary_transform, spacing=3)
+
+        if final_line is not None and not final_line.empty:
+            final_line_length = final_line.length.values[0]
+            vector_length = vector_gdf.geometry.length
+            
+            results['Actual Length'] = float(final_line_length)
+            results['Planned Length'] = float(vector_length)
+            results['FMR progress'] = float((final_line_length / vector_length) * 100)
+            results['Average Road Width'] = float(transects['width'].mean())
+
+        else:
+            results['Actual Length'] = None
+            results['Planned Length'] = None
+            results['FMR Progress'] = None
+            results['Average Road Width'] = None
+            results['message'] += ' - No road line detected'
+
+        #add export lines here later 
+
+        return results
+    
+    except Exception as e:
+        return jsonify({"status": "error", "message": str(e)}), 500
 
 def run_flask():
     """Run the Flask app using Waitress."""
