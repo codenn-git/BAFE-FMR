@@ -1,47 +1,177 @@
-and here is the fmr_ui_script.js:
-
 // JavaScript logic for FMR GUI
-// July 9: tick box; localhost; image selection
+// Optimized: Collapsible FMRs, scrollable panel, expand/collapse all, and lazy overlay
+// Optional: Add buttons to expand/collapse all in #selection-panel manually
+// <button onclick="toggleAllFMRs(true)">Expand All</button>
+// <button onclick="toggleAllFMRs(false)">Collapse All</button>
 
 const selectedIds = new Set();
-const selectedImagePaths = {};
 const geoLayers = {};
 let currentMatchingImages = {};
+const style = document.createElement('style');
+const imageCache = {};  // key: image path, value: { base64, bounds }
+const overlayLayers = {};  // key: image path, value: leaflet layer
+
+function overlayImage({ image_base64, image_bounds }, imagePath) {
+    if (!window._map) return;
+    const layerKey = `overlay_${btoa(imagePath)}`;
+    if (overlayLayers[layerKey]) return;
+
+    const img = L.imageOverlay(`data:image/png;base64,${image_base64}`, image_bounds).addTo(window._map);
+    overlayLayers[layerKey] = img;
+}
+
+function removeOverlay(imagePath) {
+    if (!window._map || !imagePath) return;
+    const layerKey = `overlay_${btoa(imagePath)}`;
+    const layer = overlayLayers[layerKey];
+    if (layer) {
+        window._map.removeLayer(layer);
+        delete overlayLayers[layerKey];
+    }
+}
+
+document.addEventListener('change', function (e) {
+    if (e.target && e.target.classList.contains('image-checkbox')) {
+        const checkbox = e.target;
+        const imagePath = checkbox.dataset.imagePath;
+        const fmrId = checkbox.dataset.fmrId;
+
+        if (checkbox.checked) {
+            if (imageCache[imagePath]) {
+                overlayImage(imageCache[imagePath], imagePath);
+            } else {
+                fetch('/display_selected_image', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ image_path: imagePath, fmr_id: parseInt(fmrId) })
+                })
+                .then(res => res.json())
+                .then(data => {
+                    if (data.status === "success") {
+                        imageCache[imagePath] = {
+                            image_base64: data.image_base64,
+                            image_bounds: data.image_bounds
+                        };
+                        overlayImage(imageCache[imagePath], imagePath);
+                    }
+                });
+            }
+        } else {
+            removeOverlay(imagePath);
+        }
+    }
+});
+
+function selectedFMRList() {
+    return Array.from(selectedIds);
+}
+
+style.textContent = `
+  #fmr-list li input[type="checkbox"] {
+    margin-right: 6px;
+  }
+  #fmr-list li label {
+    font-size: 0.95em;
+  }
+  #selection-panel {
+    max-height: 90vh;
+    overflow-y: auto;
+  }
+  .image-list {
+    display: none;
+    padding-top: 8px;
+  }
+  .image-list.show {
+    display: block;
+  }
+  .fmr-header {
+    display: flex;
+    justify-content: space-between;
+    cursor: pointer;
+    font-weight: bold;
+    font-size: 1rem;
+  }
+  .toggle-icon {
+    font-size: 0.9em;
+    color: #444;
+  }
+`;
+document.head.appendChild(style);
 
 function updateFMRList() {
     const ul = document.getElementById("fmr-list");
     ul.innerHTML = "";
+
     selectedIds.forEach(id => {
         const li = document.createElement("li");
-        li.textContent = "FMR-" + id;
+        li.classList.add("fmr-item");
+
+        const header = document.createElement("div");
+        header.classList.add("fmr-header");
+        header.innerHTML = `<span><b>FMR-${id}</b></span><span class="toggle-icon">▶</span>`;
+        li.appendChild(header);
+
+        const images = currentMatchingImages[id] || [];
+        const imageList = document.createElement("ul");
+        imageList.classList.add("image-list");
+
+        header.addEventListener("click", () => {
+            imageList.classList.toggle("show");
+            const icon = header.querySelector(".toggle-icon");
+            icon.textContent = imageList.classList.contains("show") ? "▼" : "▶";
+        });
+
+        if (images.length > 0) {
+            images.forEach((img, idx) => {
+                const item = document.createElement("li");
+                item.classList.add("image-option");
+
+                const checkbox = document.createElement("input");
+                checkbox.type = "checkbox";
+                checkbox.classList.add("image-checkbox");
+                checkbox.dataset.imagePath = img.path;
+                checkbox.dataset.fmrId = id;
+                checkbox.id = `img-${id}-${idx}`;
+                checkbox.disabled = true;
+
+                const label = document.createElement("label");
+                label.htmlFor = checkbox.id;
+                label.textContent = " " + img.path.split(/[\\/]/).pop().split("-").slice(0, 4).join("-");
+
+                item.appendChild(checkbox);
+                item.appendChild(label);
+                imageList.appendChild(item);
+
+                setTimeout(() => {
+                    checkbox.disabled = false;
+                }, 300);
+            });
+        } else {
+            const note = document.createElement("div");
+            note.style.fontSize = "0.85em";
+            note.style.color = "#888";
+            note.textContent = "(No matching images)";
+            imageList.appendChild(note);
+        }
+
+        li.appendChild(imageList);
         ul.appendChild(li);
+
         const layer = geoLayers["geoLayer_" + id];
         if (layer) layer.setStyle({color: "red", weight: 3.5});
     });
-    
-    updateDisplayButtonState();
 }
 
-function updateSelectedImagesPanel() {
-    const container = document.getElementById("selected-images-container");
-    container.innerHTML = "";
+function toggleAllFMRs(expand) {
+    const lists = document.querySelectorAll(".image-list");
+    const icons = document.querySelectorAll(".toggle-icon");
+    lists.forEach((list, idx) => {
+        if (expand) list.classList.add("show");
+        else list.classList.remove("show");
 
-    selectedIds.forEach(fmr_id => {
-        const images = selectedImagePaths[fmr_id] || [];
-        if (images.length === 0) return;
-
-        const fmrLabel = document.createElement("div");
-        fmrLabel.innerHTML = `<b>FMR-${fmr_id}</b>`;
-        container.appendChild(fmrLabel);
-
-        const ul = document.createElement("ul");
-        images.forEach(imagePath => {
-            const nameOnly = imagePath.split(/[\\/]/).pop().match(/BSG-\d{3}-\d{8}/)?.[0] || imagePath;
-            const li = document.createElement("li");
-            li.textContent = nameOnly;
-            ul.appendChild(li);
-        });
-        container.appendChild(ul);
+        if (icons[idx]) {
+            icons[idx].textContent = expand ? "▼" : "▶";
+        }
     });
 }
 
@@ -49,253 +179,46 @@ function selectFMR(fmr_id) {
     fetch("http://localhost:5000/select", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ fmr_id })
+        body: JSON.stringify({ fmr_id: fmr_id })
     })
     .then(res => res.json())
     .then(data => {
-        if (data.status !== "selected") {
+        if (data.status === "selected") {
+            selectedIds.add(fmr_id);
+            return fetch("http://localhost:5000/get_matching_images", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ fmr_id: fmr_id })
+            });
+        } else {
             alert("Already selected.");
             throw new Error("Already selected");
         }
-
-        selectedIds.add(fmr_id);
-        updateFMRList();
-
-        return fetch("http://localhost:5000/get_fmr_metadata", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ fmr_id })
-        });
     })
     .then(res => res.json())
-    .then(meta => {
-        if (meta.status !== "success") {
-            throw new Error("Metadata fetch failed");
-        }
-
-        return fetch("http://localhost:5000/get_matching_images", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ fmr_id })
-        }).then(res => res.json()).then(imageData => {
-            currentMatchingImages[fmr_id] = imageData.images || [];
-
-            const layer = geoLayers["geoLayer_" + fmr_id];
-            if (!layer) return;
-
-            // Create popup HTML (just metadata and image list)
-            let popupHtml = `
-            <div style="word-wrap: break-word; max-width: 350px;">
-                <b>FMR ID:</b> ${fmr_id}<br>
-                <b>FMR Name:</b> ${meta.name}<br>
-                <b>Barangay:</b> ${meta.barangay}<br>
-                <b>Municipality:</b> ${meta.municipality}<br>
-                <b>Province:</b> ${meta.province}<br><br>
-            `;
-
-            if (imageData.status === "success" && imageData.images.length > 0) {
-                popupHtml += `<b>Available BSG Image(s):</b><ul>`;
-                imageData.images.forEach((img) => {
-                    const shortName = img.filename.match(/BSG-\d{3}-\d{8}/)?.[0] || img.filename;
-                    popupHtml += `<li>${shortName}</li>`;
-                });
-                popupHtml += `</ul>`;
-            } else {
-                popupHtml += `<b>BSG Images:</b> No matching images found.<br><br>`;
-            }
-
-            popupHtml += `
-                <div style="display: flex; gap: 8px;">
-                    <button onclick="selectFMR(${fmr_id})">Select FMR</button>
-                    <button onclick="deselectFMR(${fmr_id})">Deselect FMR</button>
-                </div>
-            </div>`;
-
-            layer.bindPopup(popupHtml).openPopup();
-
-            // Now render checkboxes outside the popup in the main panel
-            const container = document.getElementById("image-checkboxes-area");
-            const subDivId = `fmr-checkboxes-${fmr_id}`;
-            let subDiv = document.getElementById(subDivId);
-
-            if (!subDiv) {
-                subDiv = document.createElement("div");
-                subDiv.id = subDivId;
-                subDiv.style.marginBottom = "10px";
-                container.appendChild(subDiv);
-            }
-
-            subDiv.innerHTML = `
-                <div style="margin-bottom: 4px; font-weight: bold;">FMR-${fmr_id}</div>
-            `;
-
-            imageData.images.forEach((img, i) => {
-                const imagePath = img.path.replace(/\\/g, "/");
-                const match = img.filename.match(/BSG-\d{3}-(\d{8})/);
-                const shortName = match ? img.filename.slice(0, match[0].length) : img.filename;
-
-                subDiv.innerHTML += `
-                    <div>
-                        <input type="checkbox"
-                            id="checkbox-${fmr_id}-${i}"
-                            class="image-checkbox"
-                            data-fmr-id="${fmr_id}"
-                            data-image-path="${imagePath}">
-                        <label for="checkbox-${fmr_id}-${i}">${shortName}</label>
-                    </div>
-                `;
-            });
-
-            updateDisplayButtonState();
-        });
+    .then(imageData => {
+        currentMatchingImages[fmr_id] = imageData.status === "success" ? imageData.images || [] : [];
+        updateFMRList();
     })
-    .catch(err => {
-        console.error("Error in selectFMR:", err);
-        updateDisplayButtonState();
-    });
+    .catch(err => console.error("Error in selectFMR:", err));
 }
 
 function deselectFMR(fmr_id) {
     fetch("http://localhost:5000/deselect", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ fmr_id: fmr_id })
+        body: JSON.stringify({fmr_id: fmr_id})
     }).then(res => res.json())
     .then(data => {
         if (data.status === "deselected") {
             selectedIds.delete(fmr_id);
             delete currentMatchingImages[fmr_id];
-            updateDisplayButtonState();
             updateFMRList();
-
-            // Reset layer color
             const layer = geoLayers["geoLayer_" + fmr_id];
-            if (layer) {
-                layer.setStyle({ color: "yellow", weight: 3.5 });
-
-                // Disable checkboxes inside this layer's popup
-                const popup = layer.getPopup();
-                if (popup) {
-                    const content = popup.getContent();
-                    const parser = new DOMParser();
-                    const doc = parser.parseFromString(content, "text/html");
-
-                    doc.querySelectorAll(`input[type='checkbox']`).forEach(cb => {
-                        cb.disabled = true;
-                    });
-
-                    popup.setContent(doc.body.innerHTML);
-                }
-            }
+            if (layer) layer.setStyle({color: "yellow", weight: 3.5});
         } else {
             alert("FMR not selected or error occurred.");
         }
-    });
-}
-
-function displaySelectedImages() {
-    if (selectedIds.size === 0) {
-        alert("No FMRs selected.");
-        return;
-    }
-
-    const btn = document.getElementById("displayImagesBtn");
-    btn.disabled = true;
-    btn.textContent = "Loading...";
-
-    document.querySelectorAll(".leaflet-image-layer").forEach(el => el.remove());
-
-    let pending = 0;
-
-    selectedIds.forEach(fmr_id => {
-        const checkboxes = document.querySelectorAll(`#checkbox-container-${fmr_id} input[type='checkbox']:checked`);
-        if (!checkboxes.length) return;
-
-        checkboxes.forEach(cb => {
-            const imagePath = cb.dataset.imagePath;
-            pending++;
-
-            fetch("http://localhost:5000/display_image", {
-                method: "POST",
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({ fmr_id, image_path: imagePath })
-            })
-            .then(res => res.json())
-            .then(data => {
-                if (data.status === "success") {
-                    const overlay = L.imageOverlay(
-                        `data:image/png;base64,${data.image_data}`,
-                        data.bounds,
-                        { opacity: 1.0 }
-                    ).addTo(window._map);
-                } else {
-                    console.error(`Image error: ${data.message}`);
-                }
-            })
-            .catch(err => {
-                console.error("Display error:", err);
-            })
-            .finally(() => {
-                pending--;
-                if (pending === 0) {
-                    btn.disabled = false;
-                    btn.textContent = "Display Images";
-                }
-            });
-        });
-    });
-}
-
-function runProcessing(fmr_id) {
-    const images = currentMatchingImages[fmr_id];
-    if (!images || images.length === 0) {
-        alert("No matching images found for this FMR");
-        return;
-    }
-    const trackRadio = document.getElementById(`track-${fmr_id}`);
-    const extractRadio = document.getElementById(`extract-${fmr_id}`);
-
-    let workflowType, workflowOptions = {};
-    if (trackRadio.checked) {
-        workflowType = 'track';
-        workflowOptions.mode = document.getElementById(`auto-${fmr_id}`).checked ? 'automatic' : 'manual';
-    } else if (extractRadio.checked) {
-        workflowType = 'extract';
-        workflowOptions.image_type = document.getElementById(`bsg-${fmr_id}`).checked ? 'BSG' : 'PNEO';
-    } else {
-        alert("Please select a processing workflow");
-        return;
-    }
-
-    const imagePath = images[0].path;
-    const resultsDiv = document.getElementById(`results-${fmr_id}`);
-    resultsDiv.innerHTML = '<div>Processing... Please wait.</div>';
-    resultsDiv.style.display = 'block';
-
-    fetch("http://localhost:5000/process_fmr", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-            fmr_id: fmr_id,
-            image_path: imagePath,
-            workflow_type: workflowType,
-            workflow_options: workflowOptions
-        })
-    }).then(res => res.json())
-    .then(data => {
-        if (data.status === "success") {
-            let resultHtml = `<div><b>Processing Results:</b><br>`;
-            resultHtml += `<b>Status:</b> ${data.message}<br>`;
-            if (data.length) resultHtml += `<b>Length:</b> ${data.length}<br>`;
-            if (data.progress) resultHtml += `<b>Progress:</b> ${data.progress}<br>`;
-            if (data.mean_width) resultHtml += `<b>Mean Width:</b> ${data.mean_width}<br>`;
-            resultHtml += `</div>`;
-            resultsDiv.innerHTML = resultHtml;
-        } else {
-            resultsDiv.innerHTML = `<div style="color: red;"><b>Error:</b> ${data.message}</div>`;
-        }
-    }).catch(err => {
-        resultsDiv.innerHTML = `<div style="color: red;"><b>Error:</b> ${err.message}</div>`;
     });
 }
 
@@ -305,14 +228,11 @@ function clearSelections() {
     .then(data => {
         if (data.status === "cleared") {
             selectedIds.clear();
-            
             Object.keys(currentMatchingImages).forEach(key => delete currentMatchingImages[key]);
-            updateDisplayButtonState();
-
+            Object.values(overlayLayers).forEach(layer => window._map.removeLayer(layer));
+            Object.keys(overlayLayers).forEach(key => delete overlayLayers[key]);
             updateFMRList();
-            Object.values(geoLayers).forEach(layer => {
-                layer.setStyle({color: "yellow", weight: 3.5});
-            });
+            Object.values(geoLayers).forEach(layer => layer.setStyle({color: "yellow", weight: 3.5}));
             document.querySelectorAll('[id^="processing-buttons-"]').forEach(el => el.style.display = 'none');
             document.querySelectorAll('[id^="image-display-"]').forEach(el => el.style.display = 'none');
             document.querySelectorAll('[id^="results-"]').forEach(el => el.style.display = 'none');
@@ -320,141 +240,3 @@ function clearSelections() {
     });
 }
 
-function filterByProvince() {
-    const province = document.getElementById("provinceSelect").value;
-    fetch("http://localhost:5000/filter", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({province: province})
-    }).then(res => res.json())
-    .then(data => {
-        if (data.status === "filtered") {
-            alert(`Filtered to ${data.count} FMRs`);
-            location.reload();
-        }
-    });
-}
-
-function downloadSelected() {
-    if (selectedIds.size === 0) {
-        alert("No FMRs selected");
-        return;
-    }
-    fetch("http://localhost:5000/export", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-            selected_ids: Array.from(selectedIds)
-        })
-    })
-    .then(async response => {
-        if (!response.ok) {
-            let msg = "Download failed";
-            try {
-                const data = await response.json();
-                if (data && data.message) msg = data.message;
-            } catch (e) {}
-            throw new Error(msg);
-        }
-        return response.blob();
-    })
-    .then(blob => {
-        // Try to get filename from Content-Disposition header if possible
-        let filename = "exported_fmr.zip";
-        // The fetch API does not expose headers in .then(blob), so fallback to default name
-        const url = window.URL.createObjectURL(blob);
-        const a = document.createElement("a");
-        a.href = url;
-        a.download = filename;
-        document.body.appendChild(a);
-        a.click();
-        a.remove();
-        window.URL.revokeObjectURL(url);
-    })
-    .catch(err => {
-        alert(err.message);
-    });
-}
-
-function updateFMRs() {
-    if (confirm("Update FMR data? This may take a while.")) {
-        fetch("http://localhost:5000/update_fmr", {method: "POST"})
-        .then(res => res.json())
-        .then(data => {
-            if (data.status === "success") {
-                alert("FMR data updated successfully!");
-                location.reload();
-            } else {
-                alert(`Error updating FMR: ${data.message}`);
-            }
-        });
-    }
-}
-
-function displaySelectedImages() {
-    selectedIds.forEach(fmrId => {
-        const checkboxes = document.querySelectorAll(`#checkbox-container-${fmrId} input[type='checkbox']:checked`);
-        if (checkboxes.length === 0) return;
-
-        checkboxes.forEach(cb => {
-            const imagePath = cb.dataset.imagePath;
-
-            fetch("http://127.0.0.1:5000/display_selected_image", {
-                method: "POST",
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({ fmr_id: fmrId, image_path: imagePath })
-            })
-            .then(res => res.json())
-            .then(data => {
-                if (data.status !== "success") {
-                    console.error("Failed to load image overlay:", data.message);
-                    return;
-                }
-
-                const overlay = L.imageOverlay(
-                    `data:image/png;base64,${data.image_base64}`,
-                    data.image_bounds,
-                    { opacity: 1.0 }
-                ).addTo(window._map);
-
-                // Optional: store overlay reference if you want to clear later
-                if (!window._overlays) window._overlays = {};
-                window._overlays[`${fmrId}_${imagePath}`] = overlay;
-            })
-            .catch(err => {
-                console.error("Error fetching image preview:", err);
-            });
-        });
-    });
-}
-
-
-function updateDisplayButtonState() {
-    const btn = document.getElementById("displayImagesBtn");
-    
-    if (!btn) {
-        console.error("Display button not found!");
-        return;
-    }
-
-    const hasImages = Array.from(selectedIds).some(fmr_id =>
-        currentMatchingImages[fmr_id] && currentMatchingImages[fmr_id].length > 0
-    );
-
-    console.log("Updating display button state:", {
-        selectedIds: Array.from(selectedIds),
-        hasImages: hasImages,
-        currentMatchingImages: currentMatchingImages
-    });
-
-    btn.disabled = !hasImages;
-    
-    // Update button text to provide feedback
-    if (selectedIds.size === 0) {
-        btn.textContent = "Display Images";
-    } else if (hasImages) {
-        btn.textContent = "Display Images";
-    } else {
-        btn.textContent = "No Images Available";
-    }
-}
