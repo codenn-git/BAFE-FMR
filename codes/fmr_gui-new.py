@@ -1,7 +1,3 @@
-## removed get-matching-images function
-## Available BSG images are now displayed in the popup
-## July 4, 3:53PM Display button backend working
-
 import sys
 import os
 import re
@@ -831,6 +827,20 @@ def create_fmr_map(input_gdf=None):
                 <button onclick="deselectFMR({idx})">Deselect FMR</button>
             </div>
         </div>
+        
+        <!-- ✅ Image Selection Panel -->
+        <div id="imageSelectionPanel" style="margin-top: 20px; border-top: 1px solid #ddd; padding-top: 10px;">
+            <h3 style="font-size: 1.1em; margin-bottom: 10px;">Selected Images</h3>
+            <div id="image-checkboxes-area" style="max-height: 300px; overflow-y: auto; font-size: 0.9em;">
+                <!-- Image checkboxes for selected FMRs will be inserted here dynamically -->
+            </div>
+        </div>
+
+        <div id="selected-images-container" style="margin-top: 10px;">
+            <b>Selected Image(s) per FMR:</b>
+            <!-- Dynamic list will be inserted here -->
+        </div>
+
         """
 
         geojson = folium.GeoJson(

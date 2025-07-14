@@ -1,3 +1,5 @@
+and here is the fmr_ui_script.js:
+
 // JavaScript logic for FMR GUI
 // July 9: tick box; localhost; image selection
 
@@ -18,6 +20,29 @@ function updateFMRList() {
     });
     
     updateDisplayButtonState();
+}
+
+function updateSelectedImagesPanel() {
+    const container = document.getElementById("selected-images-container");
+    container.innerHTML = "";
+
+    selectedIds.forEach(fmr_id => {
+        const images = selectedImagePaths[fmr_id] || [];
+        if (images.length === 0) return;
+
+        const fmrLabel = document.createElement("div");
+        fmrLabel.innerHTML = `<b>FMR-${fmr_id}</b>`;
+        container.appendChild(fmrLabel);
+
+        const ul = document.createElement("ul");
+        images.forEach(imagePath => {
+            const nameOnly = imagePath.split(/[\\/]/).pop().match(/BSG-\d{3}-\d{8}/)?.[0] || imagePath;
+            const li = document.createElement("li");
+            li.textContent = nameOnly;
+            ul.appendChild(li);
+        });
+        container.appendChild(ul);
+    });
 }
 
 function selectFMR(fmr_id) {
@@ -58,11 +83,7 @@ function selectFMR(fmr_id) {
             const layer = geoLayers["geoLayer_" + fmr_id];
             if (!layer) return;
 
-            // Track selected image paths for this FMR
-            if (!selectedImagePaths[fmr_id]) {
-                selectedImagePaths[fmr_id] = [];
-            }
-
+            // Create popup HTML (just metadata and image list)
             let popupHtml = `
             <div style="word-wrap: break-word; max-width: 350px;">
                 <b>FMR ID:</b> ${fmr_id}<br>
@@ -73,36 +94,12 @@ function selectFMR(fmr_id) {
             `;
 
             if (imageData.status === "success" && imageData.images.length > 0) {
-                popupHtml += `<b>Select BSG Image(s):</b><br><div id="checkbox-container-${fmr_id}">`;
-
-                imageData.images.forEach((img, i) => {
-                    let dateText = "";
-                    const match = img.filename.match(/BSG-\d{3}-(\d{8})-(\d{6})/);
-                    if (match) {
-                        const rawDate = match[1];
-                        const formattedDate = `${rawDate.slice(0, 4)}-${rawDate.slice(4, 6)}-${rawDate.slice(6)}`;
-                        dateText = `<span style='font-size: 0.8em; color: #555;'>Date: ${formattedDate}</span>`;
-                    }
-
-                    const imagePath = img.path.replace(/\\/g, "/");
-                    const isChecked = selectedImagePaths[fmr_id]?.some(
-                        p => p.replace(/\\/g, "/") === imagePath
-                    ) ? "checked" : "";
-
-                    popupHtml += `
-                        <div class="image-option" style="margin-bottom: 6px;">
-                            <input type="checkbox" id="checkbox-${fmr_id}-${i}"
-                                class="image-checkbox"
-                                data-fmr-id="${fmr_id}"
-                                data-image-path="${imagePath}"
-                                ${isChecked}>
-                            <label for="checkbox-${fmr_id}-${i}">${img.filename}</label><br>
-                            ${dateText}
-                        </div>
-                    `;
+                popupHtml += `<b>Available BSG Image(s):</b><ul>`;
+                imageData.images.forEach((img) => {
+                    const shortName = img.filename.match(/BSG-\d{3}-\d{8}/)?.[0] || img.filename;
+                    popupHtml += `<li>${shortName}</li>`;
                 });
-
-                popupHtml += `</div><br>`;
+                popupHtml += `</ul>`;
             } else {
                 popupHtml += `<b>BSG Images:</b> No matching images found.<br><br>`;
             }
@@ -116,10 +113,38 @@ function selectFMR(fmr_id) {
 
             layer.bindPopup(popupHtml).openPopup();
 
-            setTimeout(() => {
-                document.querySelectorAll(`#checkbox-container-${fmr_id} input[type='checkbox']`)
-                    .forEach(cb => cb.disabled = false);
-            }, 100);
+            // Now render checkboxes outside the popup in the main panel
+            const container = document.getElementById("image-checkboxes-area");
+            const subDivId = `fmr-checkboxes-${fmr_id}`;
+            let subDiv = document.getElementById(subDivId);
+
+            if (!subDiv) {
+                subDiv = document.createElement("div");
+                subDiv.id = subDivId;
+                subDiv.style.marginBottom = "10px";
+                container.appendChild(subDiv);
+            }
+
+            subDiv.innerHTML = `
+                <div style="margin-bottom: 4px; font-weight: bold;">FMR-${fmr_id}</div>
+            `;
+
+            imageData.images.forEach((img, i) => {
+                const imagePath = img.path.replace(/\\/g, "/");
+                const match = img.filename.match(/BSG-\d{3}-(\d{8})/);
+                const shortName = match ? img.filename.slice(0, match[0].length) : img.filename;
+
+                subDiv.innerHTML += `
+                    <div>
+                        <input type="checkbox"
+                            id="checkbox-${fmr_id}-${i}"
+                            class="image-checkbox"
+                            data-fmr-id="${fmr_id}"
+                            data-image-path="${imagePath}">
+                        <label for="checkbox-${fmr_id}-${i}">${shortName}</label>
+                    </div>
+                `;
+            });
 
             updateDisplayButtonState();
         });
