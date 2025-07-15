@@ -1,8 +1,6 @@
 // JavaScript logic for FMR GUI
-// Optimized: Collapsible FMRs, scrollable panel, expand/collapse all, and lazy overlay
-// Optional: Add buttons to expand/collapse all in #selection-panel manually
-// <button onclick="toggleAllFMRs(true)">Expand All</button>
-// <button onclick="toggleAllFMRs(false)">Collapse All</button>
+// Fixed: Multiple BSG images can now be displayed simultaneously
+// Optimized: Collapsible FMRs, scrollable panel, expand/collapse all, and lazy loading
 
 const selectedIds = new Set();
 const geoLayers = {};
@@ -12,51 +10,115 @@ const imageCache = {};  // key: image path, value: { base64, bounds }
 const overlayLayers = {};  // key: image path, value: leaflet layer
 
 function overlayImage({ image_base64, image_bounds }, imagePath) {
-    if (!window._map) return;
-    const layerKey = `overlay_${btoa(imagePath)}`;
-    if (overlayLayers[layerKey]) return;
+    if (!window._map) {
+        console.error('Map not available');
+        return;
+    }
+    
+    const layerKey = `overlay_${btoa(imagePath).replace(/[^a-zA-Z0-9]/g, '')}`;
+    
+    // Remove existing overlay if it exists
+    if (overlayLayers[layerKey]) {
+        window._map.removeLayer(overlayLayers[layerKey]);
+        delete overlayLayers[layerKey];
+    }
 
-    const img = L.imageOverlay(`data:image/png;base64,${image_base64}`, image_bounds).addTo(window._map);
-    overlayLayers[layerKey] = img;
+    try {
+        // Create image overlay with proper bounds
+        const img = L.imageOverlay(
+            `data:image/png;base64,${image_base64}`, 
+            image_bounds,
+            {
+                opacity: 1.0,
+                interactive: false,
+                zIndex: 100
+            }
+        );
+        
+        // Add to map and store reference
+        img.addTo(window._map);
+        overlayLayers[layerKey] = img;
+        
+        console.log(`Added overlay for: ${imagePath}`);
+        
+    } catch (error) {
+        console.error('Error creating image overlay:', error);
+    }
 }
 
 function removeOverlay(imagePath) {
     if (!window._map || !imagePath) return;
-    const layerKey = `overlay_${btoa(imagePath)}`;
+    
+    const layerKey = `overlay_${btoa(imagePath).replace(/[^a-zA-Z0-9]/g, '')}`;
     const layer = overlayLayers[layerKey];
+    
     if (layer) {
-        window._map.removeLayer(layer);
-        delete overlayLayers[layerKey];
+        try {
+            window._map.removeLayer(layer);
+            delete overlayLayers[layerKey];
+            console.log(`Removed overlay for: ${imagePath}`);
+        } catch (error) {
+            console.error('Error removing overlay:', error);
+        }
     }
 }
 
+// Enhanced event listener for image checkboxes
 document.addEventListener('change', function (e) {
     if (e.target && e.target.classList.contains('image-checkbox')) {
         const checkbox = e.target;
         const imagePath = checkbox.dataset.imagePath;
-        const fmrId = checkbox.dataset.fmrId;
+        const fmrId = parseInt(checkbox.dataset.fmrId);
 
         if (checkbox.checked) {
+            // Show loading indicator
+            const label = checkbox.nextElementSibling;
+            const originalText = label.textContent;
+            label.textContent = originalText + ' (Loading...)';
+            
             if (imageCache[imagePath]) {
+                // Use cached image
                 overlayImage(imageCache[imagePath], imagePath);
+                label.textContent = originalText;
             } else {
+                // Fetch and display image
                 fetch('/display_selected_image', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ image_path: imagePath, fmr_id: parseInt(fmrId) })
+                    body: JSON.stringify({ 
+                        image_path: imagePath, 
+                        fmr_id: fmrId 
+                    })
                 })
-                .then(res => res.json())
+                .then(res => {
+                    if (!res.ok) {
+                        throw new Error(`HTTP error! status: ${res.status}`);
+                    }
+                    return res.json();
+                })
                 .then(data => {
                     if (data.status === "success") {
+                        // Cache the image data
                         imageCache[imagePath] = {
-                            image_base64: data.image_base64,
-                            image_bounds: data.image_bounds
+                            image_base64: data.image_data,
+                            image_bounds: data.bounds
                         };
+                        // Display the image
                         overlayImage(imageCache[imagePath], imagePath);
+                        label.textContent = originalText;
+                    } else {
+                        throw new Error(data.message || 'Failed to load image');
                     }
+                })
+                .catch(error => {
+                    console.error('Error loading image:', error);
+                    label.textContent = originalText + ' (Error)';
+                    checkbox.checked = false;
+                    alert(`Failed to load image: ${error.message}`);
                 });
             }
         } else {
+            // Remove overlay when unchecked
             removeOverlay(imagePath);
         }
     }
@@ -89,11 +151,20 @@ style.textContent = `
     justify-content: space-between;
     cursor: pointer;
     font-weight: bold;
-    font-size: 1rem;
+    font-size: 1.4rem;
   }
   .toggle-icon {
     font-size: 0.9em;
     color: #444;
+  }
+  .image-option {
+    margin: 2px 0;
+    padding: 2px 0;
+    font-size: 1.2rem;
+  }
+  .image-checkbox:disabled + label {
+    color: #999;
+    cursor: not-allowed;
   }
 `;
 document.head.appendChild(style);
@@ -142,6 +213,7 @@ function updateFMRList() {
                 item.appendChild(label);
                 imageList.appendChild(item);
 
+                // Enable checkbox after short delay
                 setTimeout(() => {
                     checkbox.disabled = false;
                 }, 300);
@@ -157,6 +229,7 @@ function updateFMRList() {
         li.appendChild(imageList);
         ul.appendChild(li);
 
+        // Update FMR layer style
         const layer = geoLayers["geoLayer_" + id];
         if (layer) layer.setStyle({color: "red", weight: 3.5});
     });
@@ -185,6 +258,7 @@ function selectFMR(fmr_id) {
     .then(data => {
         if (data.status === "selected") {
             selectedIds.add(fmr_id);
+            updateRunButtonState();  // for updating the run button (disabling/enabling)
             return fetch("http://localhost:5000/get_matching_images", {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
@@ -212,8 +286,15 @@ function deselectFMR(fmr_id) {
     .then(data => {
         if (data.status === "deselected") {
             selectedIds.delete(fmr_id);
+            updateRunButtonState();
+            
+            // Remove all overlays for this FMR
+            const images = currentMatchingImages[fmr_id] || [];
+            images.forEach(img => removeOverlay(img.path));
+            
             delete currentMatchingImages[fmr_id];
             updateFMRList();
+            
             const layer = geoLayers["geoLayer_" + fmr_id];
             if (layer) layer.setStyle({color: "yellow", weight: 3.5});
         } else {
@@ -228,11 +309,26 @@ function clearSelections() {
     .then(data => {
         if (data.status === "cleared") {
             selectedIds.clear();
+            updateRunButtonState();
+            
+            // Remove all overlays
+            Object.keys(overlayLayers).forEach(key => {
+                if (overlayLayers[key]) {
+                    window._map.removeLayer(overlayLayers[key]);
+                    delete overlayLayers[key];
+                }
+            });
+            
+            // Clear data structures
             Object.keys(currentMatchingImages).forEach(key => delete currentMatchingImages[key]);
-            Object.values(overlayLayers).forEach(layer => window._map.removeLayer(layer));
-            Object.keys(overlayLayers).forEach(key => delete overlayLayers[key]);
+            Object.keys(imageCache).forEach(key => delete imageCache[key]);
+            
             updateFMRList();
+            
+            // Reset all FMR layer styles
             Object.values(geoLayers).forEach(layer => layer.setStyle({color: "yellow", weight: 3.5}));
+            
+            // Hide processing panels
             document.querySelectorAll('[id^="processing-buttons-"]').forEach(el => el.style.display = 'none');
             document.querySelectorAll('[id^="image-display-"]').forEach(el => el.style.display = 'none');
             document.querySelectorAll('[id^="results-"]').forEach(el => el.style.display = 'none');
@@ -240,3 +336,135 @@ function clearSelections() {
     });
 }
 
+// Additional utility functions for better overlay management
+function removeAllOverlays() {
+    Object.keys(overlayLayers).forEach(key => {
+        if (overlayLayers[key] && window._map) {
+            window._map.removeLayer(overlayLayers[key]);
+            delete overlayLayers[key];
+        }
+    });
+}
+
+function getActiveOverlays() {
+    return Object.keys(overlayLayers).map(key => ({
+        key: key,
+        layer: overlayLayers[key]
+    }));
+}
+
+// Function to check if image is already displayed
+function isImageDisplayed(imagePath) {
+    const layerKey = `overlay_${btoa(imagePath).replace(/[^a-zA-Z0-9]/g, '')}`;
+    return !!overlayLayers[layerKey];
+}
+
+// ==========================================================
+// For  processing modal
+// ==========================================================
+
+// processing functions //
+function showProcessingModal() {
+    const modal = document.getElementById('processing-modal');
+    if (modal) modal.style.display = 'flex';
+}
+
+function hideProcessingModal() {
+    const modal = document.getElementById('processing-modal');
+    if (modal) modal.style.display = 'none';
+}
+
+// ==========================================================
+// ==========================================================
+
+function runProcessing() {
+    const processType = document.querySelector('input[name="process-type"]:checked').value;
+    const workflowType = document.querySelector('input[name="workflow-type"]:checked').value;
+    const imageType = document.getElementById('image-type').value;
+    
+    // Get selected FMR IDs
+    const fmrIds = Array.from(selectedIds);
+    
+    // Get selected images if "selected" is chosen
+    const imagesToProcess = [];
+    
+    if (processType === 'selected') {
+        // Find all checked image checkboxes
+        document.querySelectorAll('.image-checkbox:checked').forEach(checkbox => {
+            imagesToProcess.push({
+                fmr_id: parseInt(checkbox.dataset.fmrId),
+                image_path: checkbox.dataset.imagePath
+            });
+        });
+        
+        if (imagesToProcess.length === 0) {
+            alert('Please select at least one image to process');
+            return;
+        }
+    } else {
+        // Process all images for selected FMRs
+        fmrIds.forEach(fmrId => {
+            const images = currentMatchingImages[fmrId] || [];
+            images.forEach(img => {
+                imagesToProcess.push({
+                    fmr_id: fmrId,
+                    image_path: img.path
+                });
+            });
+        });
+    }
+    
+    if (imagesToProcess.length === 0) {
+        alert('No images found to process');
+        return;
+    }
+    
+    // Process each image
+    imagesToProcess.forEach(item => {
+        processFMR(item.fmr_id, item.image_path, workflowType, imageType);
+    });
+    
+    hideProcessingModal();
+}
+
+function processFMR(fmr_id, image_path, workflow_type, image_type) {
+    fetch('/process_fmr', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ 
+            fmr_id: fmr_id,
+            image_path: image_path,
+            workflow_type: workflow_type,
+            image_type: image_type
+        })
+    })
+    .then(response => response.json())
+    .then(data => {
+        if (data.status === 'error') {
+            console.error('Processing error:', data.message);
+            alert(`Error processing FMR-${fmr_id}: ${data.message}`);
+        } else {
+            console.log('Processing results:', data);
+            // You can display results here or update UI as needed
+            alert(`Processing completed for FMR-${fmr_id}`);
+        }
+    })
+    .catch(error => {
+        console.error('Error:', error);
+        alert(`Error processing FMR-${fmr_id}: ${error.message}`);
+    });
+}
+
+// Update the run button state based on selections
+function updateRunButtonState() {
+    const runBtn = document.getElementById('runBtn');
+    runBtn.disabled = selectedIds.size === 0;
+}
+
+// Export functions for external use
+window.FMRUtils = {
+    selectedFMRList,
+    removeAllOverlays,
+    getActiveOverlays,
+    isImageDisplayed
+};
