@@ -17,10 +17,10 @@ from matplotlib.figure import Figure
 
 class Preprocessing:
     '''Class for preprocessing the raster'''
-    def __init__(self, crs="EPSG:32651", pneo=False):
+    def __init__(self, pneo=False):
         self.raster_path = None
         self.vector_gdf = None
-        self.crs = crs
+        self.crs = None
         self.pneo = pneo
 
         self._rep_data = None
@@ -31,6 +31,7 @@ class Preprocessing:
         self._clipped_transform = None
 
     def reproject(self, raster_path, target_crs="EPSG:32651", resampling=rasterio.enums.Resampling.nearest):
+        self.crs = target_crs
         self.raster_path = raster_path
 
         if self.pneo:
@@ -58,7 +59,8 @@ class Preprocessing:
                 transform: Transform of the raster data
                 buffer_dist: Buffer distance for the vector data
                 bbox: If True, use bounding box for clipping'''
-        
+        self.vector_gdf = vector_data.to_crs(self.crs)
+
         if raster_data is None or transform is None:
             if self._rep_data is None or self._rep_trans is None:
                 raise ValueError("Reproject has not been performed. Call reproject() first.")
@@ -66,18 +68,16 @@ class Preprocessing:
                 raster_data = self._rep_data
                 transform = self._rep_trans
 
-        if vector_data is None:
-            if self.vector_gdf is None: #if vector data is not provided, not cropped image will be returned
-                self._clipped_data = self._rep_data
-                self._clipped_transform = self._rep_trans
+        if self.vector_gdf is None: 
+            self._clipped_data = self._rep_data
+            self._clipped_transform = self._rep_trans
 
-                return self._clipped_data, self._clipped_transform
-            else:
-                centerline = self.vector_gdf.to_crs(self.crs)
-                self.vector_gdf = centerline
+            return self._clipped_data, self._clipped_transform
+        
         else:
-            centerline = vector_data.to_crs(self.crs)
-
+            self.vector_gdf = vector_data.to_crs(self.crs)
+            centerline = self.vector_gdf
+        
         buffered_lines = []
         for geometry in centerline.geometry:
             if isinstance(geometry, shapely.geometry.MultiLineString):
@@ -236,7 +236,7 @@ class Filters:
         return stretched_image
     
     def cielab(self, raster_data):
-        raster_data = np.moveaxis(self.raster_data[:3, :, :], 0, -1)  # Convert to HWC format
+        raster_data  = np.moveaxis(raster_data[:3, :, :], 0, -1)
         lab = skimage.color.rgb2lab(raster_data)
 
         return lab
@@ -414,7 +414,7 @@ class MeasureWidth:
         self._transects = None
         self.clipped_transects = None
         
-    def create_transects(self, transect_length=5, interval=3):
+    def create_transects(self, transect_length=10, interval=3):
         """Create transects perpendicular to a centerline at regular intervals."""
         self.centerline = self.centerline.geometry[0]
         
@@ -490,10 +490,15 @@ class MeasureWidth:
         if self.clipped_transects is None:
             raise ValueError("Transects not measured. Run clip_transects() first.")
 
-        if self.clipped_transects["width"].mean() < 5 and self.clipped_transects["width"].mean() > 3.8:
-            self.clipped_transects = self.clipped_transects[(self.clipped_transects["width"] >= 3.7) & (self.clipped_transects["width"] <= 5.3)]
-        else:                                                    
-            self.clipped_transects = self.clipped_transects[(self.clipped_transects["width"] >= 4) & (self.clipped_transects["width"] <= 8)]
+        self.clipped_transects = self.clipped_transects[(self.clipped_transects["width"] >= 3.5) & (self.clipped_transects["width"] <= 7)]
+
+        return self.clipped_transects[['geometry', 'width']]
+
+        ##mean based filter
+        # if self.clipped_transects["width"].mean() < 6 and self.clipped_transects["width"].mean() > 3.5:
+        #     self.clipped_transects = self.clipped_transects[(self.clipped_transects["width"] >= 3.7) & (self.clipped_transects["width"] <= 6)]
+        # else:                                                    
+        #     self.clipped_transects = self.clipped_transects[(self.clipped_transects["width"] >= 4) & (self.clipped_transects["width"] <= 8)]
 
     def process(self, int, tol, res):
         self.create_transects(interval=int)
@@ -507,10 +512,6 @@ class MeasureWidth:
         # Extract the endpoints of the transects
         left_points = [transect.coords[0] for transect in transects]  # Start points
         right_points = [transect.coords[1] for transect in transects]  # End points
-
-        # Create LineStrings by connecting the endpoints
-        left_line = shapely.geometry.LineString(left_points)  # Line along the left side
-        right_line = shapely.geometry.LineString(right_points)  # Line along the right side
 
         # Create a Polygon by combining the left and right lines
         polygon = shapely.geometry.Polygon(left_points + right_points[::-1])  # Reverse right points to close the polygon
@@ -552,9 +553,9 @@ class MeasureWidth:
         
         return self.clipped_transects
     
-    def display(self, raster, ax):
+    def display(self, vector_data, raster, ax):
         show(raster, ax=ax, transform=self.transform)
-        self.clipped_transects.plot(ax=ax, color='red', edgecolor=None, linewidth=1)
+        vector_data.plot(ax=ax, color='red', edgecolor=None, linewidth=1)
         ax.set_title("Generated Transects")
         ax.axis("off")
         
