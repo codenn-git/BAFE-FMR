@@ -1,5 +1,7 @@
-import sys
 import os
+os.environ['PROJ_LIB'] = r"C:\Users\HP\AppData\Local\Programs\Python\Python312\Lib\site-packages\pyproj\proj_dir\share\proj"
+
+import sys
 import re
 import shutil
 import threading
@@ -12,6 +14,7 @@ import rasterio
 import numpy as np
 import PIL
 import base64
+import pyproj
 
 from shapely.geometry import box
 from shapely.ops import transform as shapely_transform
@@ -33,8 +36,8 @@ import matplotlib
 matplotlib.use("Agg")
 # ==========================================================
 # Paths
-shapefile_path = r"C:\Users\user-307E123400\OneDrive - Philippine Space Agency\SDMAD_SHARED\PROJECTS\SAKA\FMR\GUI\Master FMR\NE_master_fmr.shp"
-bsg_folder = r"C:\Users\user-307E123400\OneDrive - Philippine Space Agency\SDMAD_SHARED\PROJECTS\SAKA\FMR\GUI\Raster images"
+shapefile_path = r"C:\Users\HP\OneDrive - Philippine Space Agency\SDMAD_SHARED\PROJECTS\SAKA\FMR\GUI\Master FMR\NE_master_fmr.shp"
+bsg_folder = r"C:\Users\HP\OneDrive - Philippine Space Agency\SDMAD_SHARED\PROJECTS\SAKA\FMR\GUI\Raster images"
 
 # ==========================================================
 # Flask Setup
@@ -49,7 +52,6 @@ filtered_gdf = gdf.copy()
 
 # ==========================================================
 # Processing Functions
-# not yet finished, care of aina
 
 @app.route('/process_fmr', methods=['POST'])
 def process_fmr():
@@ -59,7 +61,7 @@ def process_fmr():
     image_path = data.get("image_path")
     workflow_type = data.get("workflow_type") # manual or automatic
     image_type = data.get("image_type")  
-    fmr_db_file = os.path.join(os.path.dirname(shapefile_path), "fmr_database_aina.csv")
+    fmr_db_file = os.path.join(os.path.dirname(shapefile_path), "fmr_database.csv")
 
     global selected_features, gdf
 
@@ -211,7 +213,7 @@ def getDatabase():
 
     master_fmr = shapefile_path
     bsg_folder_path = bsg_folder
-    fmr_db_file = os.path.join(os.path.dirname(master_fmr), "fmr_database_aina.csv")
+    fmr_db_file = os.path.join(os.path.dirname(master_fmr), "fmr_database.csv")
 
     # Load FMRs in EPSG:32651
     fmr_gdf = gpd.read_file(master_fmr).to_crs("EPSG:32651")
@@ -423,8 +425,7 @@ def create_image_preview(image_path, fmr_gdf):
         }
         
     except Exception as e:
-        return jsonify({"status": "error", "message": str(e)}), 500
-    
+        return jsonify({"status": "error", "message": str(e)}), 500    
 ## ==========================================================
 
 @app.route('/get_matching_images', methods=['POST'])
@@ -462,7 +463,7 @@ def get_matching_images():
 
 @app.route('/')
 def serve_map():
-    return send_file(r"C:\Users\user-307E123400\Desktop\BAFE FMR\fmr_interactive_map.html")  # Path changed aina
+    return send_file(r"C:\Users\HP\Desktop\BAFE FMR\fmr_interactive_map.html")  
 
 
 @app.route('/select', methods=['POST'])
@@ -648,7 +649,7 @@ def display_selected_image():
         import traceback
         traceback.print_exc()
         return jsonify({"status": "error", "message": str(e)}), 500
-
+    
 # @app.route('/get_fmr_metadata', methods=['POST'])
 # def get_fmr_metadata():
 #     data = request.get_json()
@@ -677,7 +678,7 @@ def create_fmr_map(input_gdf=None):
         print("Shapefile is empty!")
         return ""
 
-    fmr_db_file = os.path.join(os.path.dirname(shapefile_path), "fmr_database_aina.csv")
+    fmr_db_file = os.path.join(os.path.dirname(shapefile_path), "fmr_database.csv")
     fmr_database = None
     if os.path.exists(fmr_db_file):
         try:
@@ -920,7 +921,7 @@ def create_fmr_map(input_gdf=None):
         </script>
     """))
 
-    html_path = "C:/Users/user-307E123400/Desktop/BAFE FMR/fmr_interactive_map.html"
+    html_path = "C:/Users/HP/Desktop/BAFE FMR/fmr_interactive_map.html"
     fmap.save(html_path)
     print("Interactive FMR map created: fmr_interactive_map.html")
     return os.path.abspath(html_path)
