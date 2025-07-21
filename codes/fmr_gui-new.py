@@ -53,76 +53,76 @@ filtered_gdf = gdf.copy()
 # ==========================================================
 # Processing Functions
 
-@app.route('/process_fmr', methods=['POST'])
-def process_fmr():
-    """Process the selected FMR with the chosen workflow"""
-    data = request.json
-    fmr_id = data.get("fmr_id")
-    image_path = data.get("image_path")
-    workflow_type = data.get("workflow_type") # manual or automatic
-    image_type = data.get("image_type")  
-    fmr_db_file = os.path.join(os.path.dirname(shapefile_path), "fmr_database.csv")
+# @app.route('/process_fmr', methods=['POST'])
+# def process_fmr():
+#     """Process the selected FMR with the chosen workflow"""
+#     data = request.json
+#     fmr_id = data.get("fmr_id")
+#     image_path = data.get("image_path")
+#     workflow_type = data.get("workflow_type") # manual or automatic
+#     image_type = data.get("image_type")  
+#     fmr_db_file = os.path.join(os.path.dirname(shapefile_path), "fmr_database.csv")
 
-    global selected_features, gdf
+#     global selected_features, gdf
 
-    if fmr_id is None or image_path is None or workflow_type is None:
-        missing = []
-        if fmr_id is None:
-            missing.append("fmr_id")
-        if not image_path:
-            missing.append("image_path")
-        if not workflow_type:
-            missing.append("workflow_type")
-        return jsonify({
-            "status": "error",
-            "message": f"Missing required parameter(s): {', '.join(missing)}"
-        }), 400
+#     if fmr_id is None or image_path is None or workflow_type is None:
+#         missing = []
+#         if fmr_id is None:
+#             missing.append("fmr_id")
+#         if not image_path:
+#             missing.append("image_path")
+#         if not workflow_type:
+#             missing.append("workflow_type")
+#         return jsonify({
+#             "status": "error",
+#             "message": f"Missing required parameter(s): {', '.join(missing)}"
+#         }), 400
     
-    try:
-        # Validate that the FMR_ID is in selected_features
-        if fmr_id not in selected_features:
-            return jsonify({"status": "error", "message": f"FMR ID {fmr_id} is not selected"}), 400
+#     try:
+#         # Validate that the FMR_ID is in selected_features
+#         if fmr_id not in selected_features:
+#             return jsonify({"status": "error", "message": f"FMR ID {fmr_id} is not selected"}), 400
         
-        # Get image path from FMR database if not provided or validate existing path
-        if not image_path:
-            # Try to recover image path from database if missing
-            if os.path.exists(fmr_db_file):
-                fmr_database = pd.read_csv(fmr_db_file)
-                fmr_name = str(gdf.loc[fmr_id].get("name", f"FMR_{fmr_id}"))
-                fmr_entry = fmr_database[fmr_database["FMR"] == fmr_name]
-                if not fmr_entry.empty and pd.notna(fmr_entry.iloc[0].get("Image Path")):
-                    image_paths = fmr_entry.iloc[0]["Image Path"].split(", ")
-                    if image_paths:
-                        image_path = image_paths[0]  # Use first available image
+#         # Get image path from FMR database if not provided or validate existing path
+#         if not image_path:
+#             # Try to recover image path from database if missing
+#             if os.path.exists(fmr_db_file):
+#                 fmr_database = pd.read_csv(fmr_db_file)
+#                 fmr_name = str(gdf.loc[fmr_id].get("name", f"FMR_{fmr_id}"))
+#                 fmr_entry = fmr_database[fmr_database["FMR"] == fmr_name]
+#                 if not fmr_entry.empty and pd.notna(fmr_entry.iloc[0].get("Image Path")):
+#                     image_paths = fmr_entry.iloc[0]["Image Path"].split(", ")
+#                     if image_paths:
+#                         image_path = image_paths[0]  # Use first available image
 
-            if not image_path or not os.path.exists(image_path):
-                return jsonify({"status": "error", "message": "No valid image path found for this FMR"}), 400
+#             if not image_path or not os.path.exists(image_path):
+#                 return jsonify({"status": "error", "message": "No valid image path found for this FMR"}), 400
 
-        elif not os.path.exists(image_path):
-            # Provided image_path is invalid
-            return jsonify({"status": "error", "message": "Provided image path does not exist"}), 400
+#         elif not os.path.exists(image_path):
+#             # Provided image_path is invalid
+#             return jsonify({"status": "error", "message": "Provided image path does not exist"}), 400
 
-        fmr_geom = gdf.loc[fmr_id].geometry
-        fmr_gdf = gpd.GeoDataFrame({'geometry': [fmr_geom]})
+#         fmr_geom = gdf.loc[fmr_id].geometry
+#         fmr_gdf = gpd.GeoDataFrame({'geometry': [fmr_geom]})
 
-        if workflow_type == 'manual':
-            # fmr_gdf = drawn_fmr #need to call this from the gui, to edit once the draw function is completed
-            # image_type = 'BSG'
+#         if workflow_type == 'manual':
+#             # fmr_gdf = drawn_fmr #need to call this from the gui, to edit once the draw function is completed
+#             # image_type = 'BSG'
             
-            return jsonify({
-                "status": "error",
-                "message": "Manual workflow not yet implemented"
-            }), 501
+#             return jsonify({
+#                 "status": "error",
+#                 "message": "Manual workflow not yet implemented"
+#             }), 501
 
-        elif workflow_type == 'automatic':
-            processing_result = processing(fmr_gdf, image_path, image_type)
-            return jsonify(processing_result)
+#         elif workflow_type == 'automatic':
+#             processing_result = processing(fmr_gdf, image_path, image_type)
+#             return jsonify(processing_result)
         
-        else:
-            return jsonify({"status": "error", "message": "Invalid workflow type"}), 400
+#         else:
+#             return jsonify({"status": "error", "message": "Invalid workflow type"}), 400
         
-    except Exception as e:
-        return jsonify({"status": "error", "message": str(e)}), 500
+#     except Exception as e:
+#         return jsonify({"status": "error", "message": str(e)}), 500
 
 ## processing function
 def processing(vector_gdf, raster_path, image_type):
@@ -426,6 +426,7 @@ def create_image_preview(image_path, fmr_gdf):
         
     except Exception as e:
         return jsonify({"status": "error", "message": str(e)}), 500    
+    
 ## ==========================================================
 
 @app.route('/get_matching_images', methods=['POST'])
@@ -460,6 +461,21 @@ def get_matching_images():
         return jsonify({"status": "error", "message": "No valid image files found for FMR"}), 404
 
     return jsonify({"status": "success", "images": images})
+
+@app.route('/get_fmrs_with_images', methods=['GET'])
+def get_fmrs_with_images():
+    fmr_db_file = os.path.join(os.path.dirname(shapefile_path), "fmr_database.csv")
+
+    if not os.path.exists(fmr_db_file):
+        return jsonify({"status": "error", "message": "FMR database not found"}), 404
+
+    df = pd.read_csv(fmr_db_file)
+    df = df[df["Image Path"].notna() & df["Image Path"].astype(str).str.strip().ne("")]
+
+    # Extract numeric index from "FMR" column like "FMR_0"
+    fmr_ids = df["FMR"].str.extract(r"FMR_(\d+)", expand=False).dropna().astype(int).unique().tolist()
+
+    return jsonify({"status": "success", "fmr_ids": fmr_ids})
 
 @app.route('/')
 def serve_map():
@@ -747,7 +763,10 @@ def create_fmr_map(input_gdf=None):
     js_ui = f"""
         <link rel="stylesheet" href="https://unpkg.com/leaflet-draw/dist/leaflet.draw.css" />
         <script src="https://unpkg.com/leaflet-draw/dist/leaflet.draw.js"></script>
+        <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css" integrity="sha512-papER...=="
+            crossorigin="anonymous" referrerpolicy="no-referrer" />
         <script src="/static/fmr_ui_script.js"></script>
+
         <style>
             #selection-panel {{
                 position: fixed;
@@ -848,9 +867,31 @@ def create_fmr_map(input_gdf=None):
                 background-color: #dc3545;
                 color: white;
             }}
+
+            /* ========== Image Toggle Button ========== */
+            .leaflet-top.leaflet-right .leaflet-control-image-toggle {{
+                background-color: #fff;
+                width: 30px;
+                height: 30px;
+                line-height: 30px;
+                text-align: center;
+                cursor: pointer;
+                box-shadow: 0 1px 5px rgba(0,0,0,0.65);
+                border-radius: 4px;
+                margin: 10px;
+                font-size: 16px;
+                transition: background-color 0.2s ease;
+            }}
+            .leaflet-control-image-toggle:hover {{
+                background-color: #f0f0f0;
+            }}
+            .leaflet-control-image-toggle.active {{
+                background-color: #4285f4;
+                color: white;
+            }}
         </style>
 
-        <!-- Selection Panel -->
+        <!------------ Selection Panel ------------>
         <div id="selection-panel">
             <b>Province Filter:</b>
             <select id="provinceSelect" onchange="filterByProvince()">
@@ -897,11 +938,16 @@ def create_fmr_map(input_gdf=None):
                 </div>
             </div>
         </div>
+
+        <!------- Image Toggle Button (Leaflet top-right) ------->
+        <div class="leaflet-top leaflet-right">
+            <div class="leaflet-control leaflet-bar leaflet-control-image-toggle" title="Show FMRs with Satellite Images" onclick="toggleImageVisibility(this)">
+                <i class="fas fa-image"></i>
+            </div>
+        </div>
     """
 
-
     fmap.get_root().html.add_child(folium.Element(js_ui))
-
     fmap.get_root().html.add_child(folium.Element(f"""
         <script>
             L.Map.addInitHook(function () {{
