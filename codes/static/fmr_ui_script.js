@@ -8,6 +8,7 @@ let currentMatchingImages = {};
 const style = document.createElement('style');
 const imageCache = {};  // key: image path, value: { base64, bounds }
 const overlayLayers = {};  // key: image path, value: leaflet layer
+let showingOnlyWithImages = false;
 
 function overlayImage({ image_base64, image_bounds }, imagePath) {
     if (!window._map) {
@@ -468,3 +469,41 @@ window.FMRUtils = {
     getActiveOverlays,
     isImageDisplayed
 };
+
+function toggleImageVisibility(button) {
+    showingOnlyWithImages = !showingOnlyWithImages;
+    button.classList.toggle('active');
+
+    if (showingOnlyWithImages) {
+        fetch('/get_fmrs_with_images')
+            .then(res => res.json())
+            .then(data => {
+                if (data.status === "success") {
+                    const visibleIds = new Set(data.fmr_ids.map(id => parseInt(id)));
+
+                    Object.entries(geoLayers).forEach(([key, layer]) => {
+                        const id = parseInt(key.replace("geoLayer_", ""));
+                        if (visibleIds.has(id)) {
+                            window._map.addLayer(layer);
+                        } else {
+                            window._map.removeLayer(layer);
+                        }
+                    });
+
+                    console.log("Now showing only FMRs with satellite images.");
+                } else {
+                    alert("Failed to filter FMRs: " + data.message);
+                }
+            })
+            .catch(err => {
+                console.error("Error fetching FMRs with images:", err);
+                alert("Could not fetch FMRs with images.");
+            });
+    } else {
+        // Show all layers again
+        Object.values(geoLayers).forEach(layer => {
+            window._map.addLayer(layer);
+        });
+        console.log("Restored all FMRs.");
+    }
+}
