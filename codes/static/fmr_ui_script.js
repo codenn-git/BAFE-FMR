@@ -359,15 +359,15 @@ function isImageDisplayed(imagePath) {
     return !!overlayLayers[layerKey];
 }
 
-// processing functions //
+// processing modal functions //
 function showProcessingModal() {
     const modal = document.getElementById('processing-modal');
-    modal.style.display = 'block';
+    if (modal) modal.style.display = 'flex';
 }
 
 function hideProcessingModal() {
     const modal = document.getElementById('processing-modal');
-    modal.style.display = 'none';
+    if (modal) modal.style.display = 'none';
 }
 
 function runProcessing() {
@@ -461,3 +461,42 @@ window.FMRUtils = {
     getActiveOverlays,
     isImageDisplayed
 };
+let showingOnlyWithImages = false;
+
+function toggleImageVisibility(button) {
+    showingOnlyWithImages = !showingOnlyWithImages;
+    button.classList.toggle('active');
+
+    if (showingOnlyWithImages) {
+        fetch('/get_fmrs_with_images')
+            .then(res => res.json())
+            .then(data => {
+                if (data.status === "success") {
+                    const visibleIds = new Set(data.fmr_ids.map(id => parseInt(id)));
+
+                    Object.entries(geoLayers).forEach(([key, layer]) => {
+                        const id = parseInt(key.replace("geoLayer_", ""));
+                        if (visibleIds.has(id)) {
+                            window._map.addLayer(layer);
+                        } else {
+                            window._map.removeLayer(layer);
+                        }
+                    });
+
+                    console.log("Now showing only FMRs with satellite images.");
+                } else {
+                    alert("Failed to filter FMRs: " + data.message);
+                }
+            })
+            .catch(err => {
+                console.error("Error fetching FMRs with images:", err);
+                alert("Could not fetch FMRs with images.");
+            });
+    } else {
+        // Show all layers again
+        Object.values(geoLayers).forEach(layer => {
+            window._map.addLayer(layer);
+        });
+        console.log("Restored all FMRs.");
+    }
+}

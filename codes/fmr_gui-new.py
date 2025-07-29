@@ -101,7 +101,14 @@ def process_fmr():
             return jsonify({"status": "error", "message": "Provided image path does not exist"}), 400
 
         fmr_geom = gdf.loc[fmr_id].geometry
-        fmr_gdf = gpd.GeoDataFrame({'geometry': [fmr_geom]})
+        
+        # FIX: Create GeoDataFrame with proper CRS
+        fmr_gdf = gpd.GeoDataFrame({'geometry': [fmr_geom]}, crs=gdf.crs)
+        
+        # Alternative: If gdf doesn't have CRS, set it explicitly
+        # Assuming your data is in WGS84 (EPSG:4326) - adjust as needed
+        if fmr_gdf.crs is None:
+            fmr_gdf = fmr_gdf.set_crs('EPSG:4326')  # or whatever your original CRS is
 
         if workflow_type == 'manual':
             # fmr_gdf = drawn_fmr #need to call this from the gui, to edit once the draw function is completed
@@ -127,31 +134,37 @@ def processing(vector_gdf, raster_path, image_type):
     results = {}
     raster_directory = os.path.dirname(raster_path)
     master_directory = os.path.dirname(raster_directory)
-    output_folder = os.path.dirname(os.path.dirname(raster_path))
+    output_folder = os.path.join(os.path.dirname(os.path.dirname(master_directory)), "Outputs")
 
     try:
+        # FIX: Ensure vector_gdf has a CRS before any operations
+        if vector_gdf.crs is None:
+            # Set appropriate CRS - adjust EPSG code based on your data
+            vector_gdf = vector_gdf.set_crs('EPSG:32651')  # WGS84 as default
+            print("Warning: No CRS found, setting to EPSG:32651")
+        
         preprocessor = Preprocessing()
         preprocessor.reproject(raster_path)
         
         if image_type == 'BSG':
-            int, tol, res = 3, 0.4, 0.3
-            preprocessor.reproject(raster_path)
+            int, tol, res = 3, 0.15, 0.3
 
-            clipped_data, clipped_transform = preprocessor.clipraster(vector_data=vector_gdf, buffer_dist=30) #bbox=False
+            clipped_data, clipped_transform = preprocessor.clipraster(vector_data=vector_gdf, buffer_dist=25) #bbox=False
 
             filter = Filters()
             warm_raster = filter.enhance_image_warmth(clipped_data)
             stretch_raster = filter.enhance_linear_stretch(clipped_data)
 
             morph = Morph()
-            morph_warm = morph.process(warm_raster)
-            morph_stretch = morph.process(stretch_raster)
+            morph_warm = morph.process(warm_raster, a=4, b=3, ite1=2, ite2=3)
+            morph_stretch = morph.process(stretch_raster, a=4, b=3, ite1=2, ite2=3)
 
             merged_or = np.logical_or(morph_warm, morph_stretch)
             initial_binary_raster = merged_or
 
         if image_type == 'PNEO':
-            int, tol, res = 3, 0.15, 0.3 
+            int, tol, res = 3, 0.15, 0.3
+
             clipped_data, clipped_transform = preprocessor.clipraster(vector_data=vector_gdf, bbox=True)
 
             filter = Filters()
@@ -163,21 +176,36 @@ def processing(vector_gdf, raster_path, image_type):
         final_binary_transform = clipped_transform
 
         # plt.imshow(final_clipped_data, cmap="gray")
-        final_binary_raster = morph.remove_small_islands(initial_binary_raster, min_size=1000)
+        final_binary_raster = morph.remove_small_islands(initial_binary_raster, min_size=500)
+        final_binary_raster = np.squeeze(final_binary_raster)
         final_binary_raster = cv2.morphologyEx(final_binary_raster.astype(np.uint8), cv2.MORPH_CLOSE, np.ones((3,3), np.uint8), iterations=3)
 
         measure = MeasureWidth(final_binary_raster, final_binary_transform, vector_gdf)
         transects = measure.process(int=int, tol=tol, res=res)
         road_polygon = measure.generate_polygon() #export??
-    
+
+        ## NEED TO ADD EXPORT lines here on designated folder...
+
+        final_binary_raster, final_binary_transform = preprocessor.clipraster(
+                            raster_data = final_binary_raster.astype(np.uint8),
+                            vector_data = vector_gdf,
+                            transform = clipped_transform,
+                            buffer_dist = 3)
+        final_binary_raster = np.squeeze(final_binary_raster)
+
         final_line = measure_line(final_binary_raster, final_binary_transform, spacing=3)
 
         if final_line is not None and not final_line.empty:
             final_line_length = final_line.length.values[0]
-            vector_length = vector_gdf.geometry.length
+            
+            # FIX: Ensure CRS is set before transformation
+            if vector_gdf.crs is None:
+                vector_gdf = vector_gdf.set_crs('EPSG:32651')
+            
+            vector_length = vector_gdf.to_crs("EPSG:32651").length.sum()
             
             results['Actual Length'] = float(final_line_length)
-            results['Planned Length'] = vector_length
+            results['Planned Length'] = float(vector_length)
             results['FMR progress'] = (final_line_length / vector_length) * 100
             results['Average Road Width'] = float(transects['width'].mean())
 
@@ -186,7 +214,7 @@ def processing(vector_gdf, raster_path, image_type):
             results['Planned Length'] = None
             results['FMR Progress'] = None
             results['Average Road Width'] = None
-            results['message'] += ' - No road line detected'
+            results['message'] = 'No road line detected'
 
         #add export lines here later 
 
@@ -379,7 +407,7 @@ def stretch_band(band, lower_percent=2, upper_percent=98):
     lower = np.percentile(band, lower_percent)
     upper = np.percentile(band, upper_percent)
 
-    # 🛡️ Prevent divide-by-zero error
+    # Prevent divide-by-zero error
     if upper == lower:
         return np.zeros_like(band, dtype=np.float32)
 
@@ -459,6 +487,22 @@ def get_matching_images():
         return jsonify({"status": "error", "message": "No valid image files found for FMR"}), 404
 
     return jsonify({"status": "success", "images": images})
+
+## Added 07/28 2:04; for image-available FMR visibility
+@app.route('/get_fmrs_with_images', methods=['GET'])
+def get_fmrs_with_images():
+    fmr_db_file = os.path.join(os.path.dirname(shapefile_path), "fmr_database.csv")
+
+    if not os.path.exists(fmr_db_file):
+        return jsonify({"status": "error", "message": "FMR database not found"}), 404
+
+    df = pd.read_csv(fmr_db_file)
+    df = df[df["Image Path"].notna() & df["Image Path"].astype(str).str.strip().ne("")]
+
+    # Extract numeric index from "FMR" column like "FMR_0"
+    fmr_ids = df["FMR"].str.extract(r"FMR_(\d+)", expand=False).dropna().astype(int).unique().tolist()
+
+    return jsonify({"status": "success", "fmr_ids": fmr_ids})
 
 @app.route('/')
 def serve_map():
@@ -744,114 +788,190 @@ def create_fmr_map(input_gdf=None):
     province_options = "".join([f"<option value='{p}'>{p}</option>" for p in provinces])
 
     js_ui = f"""
-    <link rel="stylesheet" href="https://unpkg.com/leaflet-draw/dist/leaflet.draw.css" />
-    <script src="https://unpkg.com/leaflet-draw/dist/leaflet.draw.js"></script>
-    <script src="/static/fmr_ui_script.js"></script>
-    <style>
-        #selection-panel {{ position: fixed; bottom: 5px; left: 5px; background: rgba(255,255,255,0.95); padding: 10px; border-radius: 8px; box-shadow: 0 2px 6px rgba(0,0,0,0.3); z-index: 9999; max-width: 300px; overflor-x: auto}}
-        #selection-panel ul {{ max-height: 100px; overflow-y: auto; padding-left: 20px; }}
-        #selection-panel select, #selection-panel button {{ width: 100%; margin-top: 6px; }}
-        .clear-btn {{ background-color: #dc3545; color: white; }}
-        .clear-btn:hover {{ background-color: #a71d2a; }}
-        #processFMRBtn:disabled {{ background-color: #e0e0e0; color: #777777; cursor: not-allowed; }}
-        .image-preview {{ max-width: 300px; max-height: 200px; margin-top: 10px; }}
-        .image-option input[type='checkbox'][disabled] + label {{ color: #999; cursor: not-allowed; }}
-    
-        * New modal styles */
-        #processing-modal {{
-            display: none;
-            position: fixed;
-            top: 50%;
-            left: 50%;
-            transform: translate(-50%, -50%);
-            background: white;
-            padding: 20px;
-            border-radius: 8px;
-            box-shadow: 0 0 20px rgba(0,0,0,0.3);
-            z-index: 10000;
-            width: 300px;
-        }}
-        #processing-modal h3 {{
-            margin-top: 0;
-            text-align: center;
-        }}
-        #processing-modal .option-group {{
-            margin: 15px 0;
-        }}
-        #processing-modal label {{
-            display: block;
-            margin: 5px 0;
-        }}
-        #processing-modal select {{
-            width: 100%;
-            padding: 5px;
-        }}
-        #processing-modal .modal-buttons {{
-            display: flex;
-            justify-content: space-between;
-            margin-top: 20px;
-        }}
-        #processing-modal button {{
-            padding: 8px 15px;
-            border: none;
-            border-radius: 4px;
-            cursor: pointer;
-        }}
-        #processing-modal #run-processing {{
-            background-color: #28a745;
-            color: white;
-        }}
-        #processing-modal #cancel-processing {{
-            background-color: #dc3545;
-            color: white;
-        }}
-    </style>
+        <link rel="stylesheet" href="https://unpkg.com/leaflet-draw/dist/leaflet.draw.css" />
+        <script src="https://unpkg.com/leaflet-draw/dist/leaflet.draw.js"></script>
+        <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css" integrity="sha512-papER...=="
+            crossorigin="anonymous" referrerpolicy="no-referrer" />
+        <script src="/static/fmr_ui_script.js"></script>
+        
+        <style>
+            #selection-panel {{
+                position: fixed;
+                bottom: 5px;
+                left: 5px;
+                background: rgba(255,255,255,0.95);
+                padding: 10px;
+                border-radius: 8px;
+                box-shadow: 0 2px 6px rgba(0,0,0,0.3);
+                z-index: 9999;
+                max-width: 300px;
+                overflow-x: auto;
+            }}
+            #selection-panel ul {{
+                max-height: 100px;
+                overflow-y: auto;
+                padding-left: 20px;
+            }}
+            #selection-panel select,
+            #selection-panel button {{
+                width: 100%;
+                margin-top: 6px;
+            }}
+            .clear-btn {{
+                background-color: #dc3545;
+                color: white;
+            }}
+            .clear-btn:hover {{
+                background-color: #a71d2a;
+            }}
+            #processFMRBtn:disabled {{
+                background-color: #e0e0e0;
+                color: #777777;
+                cursor: not-allowed;
+            }}
+            .image-preview {{
+                max-width: 300px;
+                max-height: 200px;
+                margin-top: 10px;
+            }}
+            .image-option input[type='checkbox'][disabled] + label {{
+                color: #999;
+                cursor: not-allowed;
+            }}
+        
+            /* ========== Modal Styling ========== */
+            #processing-modal {{
+                display: none;
+                position: fixed;
+                top: 0; left: 0;
+                width: 100vw;
+                height: 100vh;
+                background-color: rgba(0, 0, 0, 0.4);
+                z-index: 10000;
+                justify-content: center;
+                align-items: center;
+            }}
+            #processing-modal-content {{
+                background: white;
+                padding: 20px 25px;
+                border-radius: 10px;
+                box-shadow: 0 0 20px rgba(0,0,0,0.3);
+                width: 90%;
+                max-width: 400px;
+            }}
+            #processing-modal h3 {{
+                margin-top: 0;
+                text-align: center;
+            }}
+            #processing-modal .option-group {{
+                margin: 15px 0;
+            }}
+            #processing-modal label {{
+                display: block;
+                margin: 5px 0;
+            }}
+            #processing-modal select {{
+                width: 100%;
+                padding: 6px;
+            }}
+            #processing-modal .modal-buttons {{
+                display: flex;
+                justify-content: flex-end;
+                gap: 10px;
+                margin-top: 20px;
+            }}
+            #processing-modal .modal-buttons button {{
+                padding: 8px 15px;
+                border: none;
+                border-radius: 4px;
+                cursor: pointer;
+            }}
+            #processing-modal #run-processing {{
+                background-color: #28a745;
+                color: white;
+            }}
+            #processing-modal #cancel-processing {{
+                background-color: #dc3545;
+                color: white;
+            }}
 
-    <div id="selection-panel">
-        <b>Province Filter:</b>
-        <select id="provinceSelect" onchange="filterByProvince()">
-            <option value="All">All</option>
-            {province_options}
-        </select>
-        <b>Selected FMR(s):</b>
-        <ul id="fmr-list"></ul>
-        <button id="runBtn" onclick="showProcessingModal()" disabled>
-            Run
-        </button>
-        <button onclick="downloadSelected()">Export Selected</button>
-        <button class="clear-btn" onclick="clearSelections()">Clear</button>
-        <button onclick="updateFMRs()">Update FMR</button>
-        <div id="dynamic-processing-panel" style="margin-top: 20px;"></div>
-    </div>
+            /* ========== Image Toggle Button ========== */
+            .leaflet-top.leaflet-right .leaflet-control-image-toggle {{
+                background-color: #fff;
+                width: 30px;
+                height: 30px;
+                line-height: 30px;
+                text-align: center;
+                cursor: pointer;
+                box-shadow: 0 1px 5px rgba(0,0,0,0.65);
+                border-radius: 4px;
+                margin: 10px;
+                font-size: 16px;
+                transition: background-color 0.2s ease;
+            }}
+            .leaflet-control-image-toggle:hover {{
+                background-color: #f0f0f0;
+            }}
+            .leaflet-control-image-toggle.active {{
+                background-color: #4285f4;
+                color: white;
+            }}
+        </style>
 
-    <div id="processing-modal">
-        <h3>Processing Options</h3>
-        
-        <div class="option-group">
-            <strong>Process:</strong>
-            <label><input type="radio" name="process-type" value="selected" checked> Selected images only</label>
-            <label><input type="radio" name="process-type" value="all"> All images</label>
-        </div>
-        
-        <div class="option-group">
-            <strong>Workflow Type:</strong>
-            <label><input type="radio" name="workflow-type" value="manual"> Manual</label>
-            <label><input type="radio" name="workflow-type" value="automatic" checked> Automatic</label>
-        </div>
-        
-        <div class="option-group">
-            <strong>Image Type:</strong>
-            <select id="image-type">
-                <option value="BSG">BSG</option>
-                <option value="PNEO">PNEO</option>
+        <!------------ Selection Panel ------------>
+        <div id="selection-panel">
+            <b>Province Filter:</b>
+            <select id="provinceSelect" onchange="filterByProvince()">
+                <option value="All">All</option>
+                {province_options}
             </select>
+            <b>Selected FMR(s):</b>
+            <ul id="fmr-list"></ul>
+            <button id="runBtn" onclick="showProcessingModal()" disabled>Run</button>
+            <button onclick="downloadSelected()">Export Selected</button>
+            <button class="clear-btn" onclick="clearSelections()">Clear</button>
+            <button onclick="updateFMRs()">Update FMR</button>
+            <div id="dynamic-processing-panel" style="margin-top: 20px;"></div>
         </div>
-        
-        <div class="modal-buttons">
-            <button id="cancel-processing" onclick="hideProcessingModal()">Cancel</button>
-            <button id="run-processing" onclick="runProcessing()">Run</button>
+
+        <!-- Processing Modal -->
+        <div id="processing-modal">
+            <div id="processing-modal-content">
+                <h3>Processing Options</h3>
+
+                <div class="option-group">
+                    <strong>Process:</strong>
+                    <label><input type="radio" name="process-type" value="selected" checked> Selected images only</label>
+                    <label><input type="radio" name="process-type" value="all"> All images</label>
+                </div>
+
+                <div class="option-group">
+                    <strong>Workflow Type:</strong>
+                    <label><input type="radio" name="workflow-type" value="manual"> Manual</label>
+                    <label><input type="radio" name="workflow-type" value="automatic" checked> Automatic</label>
+                </div>
+
+                <div class="option-group">
+                    <strong>Image Type:</strong>
+                    <select id="image-type">
+                        <option value="BSG">BSG</option>
+                        <option value="PNEO">PNEO</option>
+                    </select>
+                </div>
+
+                <div class="modal-buttons">
+                    <button id="cancel-processing" onclick="hideProcessingModal()">Cancel</button>
+                    <button id="run-processing" onclick="runProcessing()">Run</button>
+                </div>
+            </div>
         </div>
-    </div>
+
+        <!-- Image Toggle Button (Leaflet top-right) -->
+        <div class="leaflet-top leaflet-right">
+            <div class="leaflet-control leaflet-bar leaflet-control-image-toggle" title="Show FMRs with Satellite Images" onclick="toggleImageVisibility(this)">
+                <i class="fas fa-image"></i>
+            </div>
+        </div>
     """
 
     fmap.get_root().html.add_child(folium.Element(js_ui))
