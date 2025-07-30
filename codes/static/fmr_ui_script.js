@@ -8,7 +8,6 @@ let currentMatchingImages = {};
 const style = document.createElement('style');
 const imageCache = {};  // key: image path, value: { base64, bounds }
 const overlayLayers = {};  // key: image path, value: leaflet layer
-let showingOnlyWithImages = false;
 
 function overlayImage({ image_base64, image_bounds }, imagePath) {
     if (!window._map) {
@@ -360,11 +359,7 @@ function isImageDisplayed(imagePath) {
     return !!overlayLayers[layerKey];
 }
 
-// ==========================================================
-// For  processing modal
-// ==========================================================
-
-// processing functions //
+// processing modal functions //
 function showProcessingModal() {
     const modal = document.getElementById('processing-modal');
     if (modal) modal.style.display = 'flex';
@@ -374,9 +369,6 @@ function hideProcessingModal() {
     const modal = document.getElementById('processing-modal');
     if (modal) modal.style.display = 'none';
 }
-
-// ==========================================================
-// ==========================================================
 
 function runProcessing() {
     const processType = document.querySelector('input[name="process-type"]:checked').value;
@@ -469,6 +461,7 @@ window.FMRUtils = {
     getActiveOverlays,
     isImageDisplayed
 };
+let showingOnlyWithImages = false;
 
 function toggleImageVisibility(button) {
     showingOnlyWithImages = !showingOnlyWithImages;
@@ -506,4 +499,138 @@ function toggleImageVisibility(button) {
         });
         console.log("Restored all FMRs.");
     }
+}
+
+// EVERYTHING MANUAL 
+
+let manualFMRs = []; // [{ id, geometry: GeoJSON, name }]
+let manualFMRCounter = 0;
+
+function addManualFMRRow() {
+    const container = document.getElementById('manual-fmr-container');
+    const index = manualFMRCounter++;
+
+    const row = document.createElement('div');
+    row.classList.add('manual-fmr-row');
+    row.id = `manual-fmr-${index}`;
+    row.style.display = 'flex';
+    row.style.alignItems = 'center';
+    row.style.gap = '10px';
+    row.style.marginBottom = '10px';
+
+    const drawBtn = document.createElement('button');
+    drawBtn.textContent = '🖊️ Draw FMR';
+    drawBtn.onclick = () => drawManualLine(index);
+
+    const input = document.createElement('input');
+    input.type = 'text';
+    input.placeholder = 'Enter FMR name';
+    input.oninput = (e) => {
+        const fmr = manualFMRs.find(f => f.id === index);
+        if (fmr) fmr.name = e.target.value;
+    };
+
+    const deleteBtn = document.createElement('button');
+    deleteBtn.textContent = '❌';
+    deleteBtn.onclick = () => removeManualFMRRow(index);
+
+    row.appendChild(drawBtn);
+    row.appendChild(input);
+    row.appendChild(deleteBtn);
+    container.appendChild(row);
+
+    manualFMRs.push({ id: index, name: '', geometry: null });
+
+    // Optional: grow modal dynamically
+    document.getElementById('processing-modal').style.height = 'auto';
+}
+
+function removeManualFMRRow(index) {
+    document.getElementById(`manual-fmr-${index}`).remove();
+    manualFMRs = manualFMRs.filter(f => f.id !== index);
+}
+
+function drawManualLine(index) {
+    if (!window._map) return;
+
+    toggleDrawingUI(true); // 🔍 Hide everything except map
+
+    if (!window._drawControl) {
+        window._drawControl = new L.Control.Draw({
+            draw: { polygon: false, marker: false, circle: false, rectangle: false, circlemarker: false, polyline: true },
+            edit: false
+        });
+        window._map.addControl(window._drawControl);
+    }
+
+    const drawHandler = new L.Draw.Polyline(window._map);
+    drawHandler.enable();
+
+    window._map.once(L.Draw.Event.CREATED, function (e) {
+        const layer = e.layer;
+        const geojson = layer.toGeoJSON();
+        const fmr = manualFMRs.find(f => f.id === index);
+        if (fmr) fmr.geometry = geojson.geometry;
+
+        layer.addTo(window._map);
+
+        // 🔙 Show UI back
+        toggleDrawingUI(false);
+    });
+}
+
+
+// Patch runProcessing to send manualFMRs
+function runProcessing() {
+    const workflowType = document.querySelector('input[name="workflow-type"]:checked').value;
+    const imageType = document.getElementById('image-type').value;
+    const processType = document.querySelector('input[name="process-type"]:checked').value;
+
+    if (workflowType === 'manual') {
+        const valid = manualFMRs.every(f => f.geometry && f.name);
+        if (!valid) {
+            alert("Please complete all drawn FMRs and name them.");
+            return;
+        }
+
+        fetch('/process_fmr', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                workflow_type: 'manual',
+                image_type: imageType,
+                manual_fmrs: manualFMRs.map(f => ({
+                    name: f.name,
+                    geometry: f.geometry
+                }))
+            })
+        })
+        .then(res => res.json())
+        .then(data => {
+            if (data.status === 'success') {
+                alert("Manual processing complete. Check results console.");
+                console.log(data.results);
+            } else {
+                alert("Error: " + data.message);
+            }
+        })
+        .catch(err => alert("Request error: " + err.message));
+
+        return;
+    }
+}
+
+function toggleManualSection() {
+    const isManual = document.querySelector('input[name="workflow-type"]:checked').value === 'manual';
+    document.getElementById('manual-fmr-section').style.display = isManual ? 'block' : 'none';
+}
+
+function toggleDrawingUI(showMapOnly) {
+    // Hide or show the processing modal
+    const modal = document.getElementById('processing-modal');
+    if (modal) modal.style.display = showMapOnly ? 'none' : 'flex';
+
+    // Hide or show the selection panel
+    const panel = document.getElementById('selection-panel');
+    if (panel) panel.style.display = showMapOnly ? 'none' : 'block';
 }
