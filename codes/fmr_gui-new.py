@@ -1,7 +1,5 @@
-import os
-os.environ['PROJ_LIB'] = r"C:\Users\HP\AppData\Local\Programs\Python\Python312\Lib\site-packages\pyproj\proj_dir\share\proj"
-
 import sys
+import os
 import re
 import shutil
 import threading
@@ -14,7 +12,6 @@ import rasterio
 import numpy as np
 import PIL
 import base64
-import pyproj
 
 from shapely.geometry import box
 from shapely.ops import transform as shapely_transform
@@ -36,8 +33,9 @@ import matplotlib
 matplotlib.use("Agg")
 # ==========================================================
 # Paths
-shapefile_path = r"C:\Users\HP\OneDrive - Philippine Space Agency\SDMAD_SHARED\PROJECTS\SAKA\FMR\GUI\Master FMR\NE_master_fmr.shp"
-bsg_folder = r"C:\Users\HP\OneDrive - Philippine Space Agency\SDMAD_SHARED\PROJECTS\SAKA\FMR\GUI\Raster images"
+shapefile_path = r"C:\Users\user-307E123400\OneDrive - Philippine Space Agency\SDMAD_SHARED\PROJECTS\SAKA\FMR\GUI\Master FMR\NE_master_fmr.shp"
+bsg_folder = r"C:\Users\user-307E123400\OneDrive - Philippine Space Agency\SDMAD_SHARED\PROJECTS\SAKA\FMR\GUI\Raster images"
+pneo_folder = bsg_folder # palceholder na lang muna
 
 # ==========================================================
 # Flask Setup
@@ -52,108 +50,119 @@ filtered_gdf = gdf.copy()
 
 # ==========================================================
 # Processing Functions
+# not yet finished, care of aina
 
-# @app.route('/process_fmr', methods=['POST'])
-# def process_fmr():
-#     """Process the selected FMR with the chosen workflow"""
-#     data = request.json
-#     fmr_id = data.get("fmr_id")
-#     image_path = data.get("image_path")
-#     workflow_type = data.get("workflow_type") # manual or automatic
-#     image_type = data.get("image_type")  
-#     fmr_db_file = os.path.join(os.path.dirname(shapefile_path), "fmr_database.csv")
+@app.route('/process_fmr', methods=['POST'])
+def process_fmr():
+    """Process the selected FMR with the chosen workflow"""
+    data = request.json
+    fmr_id = data.get("fmr_id")
+    image_path = data.get("image_path")
+    workflow_type = data.get("workflow_type") # manual or automatic
+    image_type = data.get("image_type")  
+    fmr_db_file = os.path.join(os.path.dirname(shapefile_path), "fmr_database.csv")
 
-#     global selected_features, gdf
+    global selected_features, gdf
 
-#     if fmr_id is None or image_path is None or workflow_type is None:
-#         missing = []
-#         if fmr_id is None:
-#             missing.append("fmr_id")
-#         if not image_path:
-#             missing.append("image_path")
-#         if not workflow_type:
-#             missing.append("workflow_type")
-#         return jsonify({
-#             "status": "error",
-#             "message": f"Missing required parameter(s): {', '.join(missing)}"
-#         }), 400
+    if fmr_id is None or image_path is None or workflow_type is None:
+        missing = []
+        if fmr_id is None:
+            missing.append("fmr_id")
+        if not image_path:
+            missing.append("image_path")
+        if not workflow_type:
+            missing.append("workflow_type")
+        return jsonify({
+            "status": "error",
+            "message": f"Missing required parameter(s): {', '.join(missing)}"
+        }), 400
     
-#     try:
-#         # Validate that the FMR_ID is in selected_features
-#         if fmr_id not in selected_features:
-#             return jsonify({"status": "error", "message": f"FMR ID {fmr_id} is not selected"}), 400
+    try:
+        # Validate that the FMR_ID is in selected_features
+        if fmr_id not in selected_features:
+            return jsonify({"status": "error", "message": f"FMR ID {fmr_id} is not selected"}), 400
         
-#         # Get image path from FMR database if not provided or validate existing path
-#         if not image_path:
-#             # Try to recover image path from database if missing
-#             if os.path.exists(fmr_db_file):
-#                 fmr_database = pd.read_csv(fmr_db_file)
-#                 fmr_name = str(gdf.loc[fmr_id].get("name", f"FMR_{fmr_id}"))
-#                 fmr_entry = fmr_database[fmr_database["FMR"] == fmr_name]
-#                 if not fmr_entry.empty and pd.notna(fmr_entry.iloc[0].get("Image Path")):
-#                     image_paths = fmr_entry.iloc[0]["Image Path"].split(", ")
-#                     if image_paths:
-#                         image_path = image_paths[0]  # Use first available image
+        # Get image path from FMR database if not provided or validate existing path
+        if not image_path:
+            # Try to recover image path from database if missing
+            if os.path.exists(fmr_db_file):
+                fmr_database = pd.read_csv(fmr_db_file)
+                fmr_name = str(gdf.loc[fmr_id].get("name", f"FMR_{fmr_id}"))
+                fmr_entry = fmr_database[fmr_database["FMR"] == fmr_name]
+                if not fmr_entry.empty and pd.notna(fmr_entry.iloc[0].get("Image Path")):
+                    image_paths = fmr_entry.iloc[0]["Image Path"].split(", ")
+                    if image_paths:
+                        image_path = image_paths[0]  # Use first available image
 
-#             if not image_path or not os.path.exists(image_path):
-#                 return jsonify({"status": "error", "message": "No valid image path found for this FMR"}), 400
+            if not image_path or not os.path.exists(image_path):
+                return jsonify({"status": "error", "message": "No valid image path found for this FMR"}), 400
 
-#         elif not os.path.exists(image_path):
-#             # Provided image_path is invalid
-#             return jsonify({"status": "error", "message": "Provided image path does not exist"}), 400
+        elif not os.path.exists(image_path):
+            # Provided image_path is invalid
+            return jsonify({"status": "error", "message": "Provided image path does not exist"}), 400
 
-#         fmr_geom = gdf.loc[fmr_id].geometry
-#         fmr_gdf = gpd.GeoDataFrame({'geometry': [fmr_geom]})
-
-#         if workflow_type == 'manual':
-#             # fmr_gdf = drawn_fmr #need to call this from the gui, to edit once the draw function is completed
-#             # image_type = 'BSG'
-            
-#             return jsonify({
-#                 "status": "error",
-#                 "message": "Manual workflow not yet implemented"
-#             }), 501
-
-#         elif workflow_type == 'automatic':
-#             processing_result = processing(fmr_gdf, image_path, image_type)
-#             return jsonify(processing_result)
+        fmr_geom = gdf.loc[fmr_id].geometry
         
-#         else:
-#             return jsonify({"status": "error", "message": "Invalid workflow type"}), 400
+        # FIX: Create GeoDataFrame with proper CRS
+        fmr_gdf = gpd.GeoDataFrame({'geometry': [fmr_geom]}, crs=gdf.crs)
         
-#     except Exception as e:
-#         return jsonify({"status": "error", "message": str(e)}), 500
+        # Alternative: If gdf doesn't have CRS, set it explicitly
+        # Assuming your data is in WGS84 (EPSG:4326) - adjust as needed
+        if fmr_gdf.crs is None:
+            fmr_gdf = fmr_gdf.set_crs('EPSG:4326')  # or whatever your original CRS is
+
+        if workflow_type == 'manual':
+            manual_fmrs = data.get("fmr_gdf", [])
+            image_type = data.get("image_type", "BSG")
+            return jsonify(*manual_processing(fmr_gdf, image_type))
+
+
+        elif workflow_type == 'automatic':
+            processing_result = automatic_processing(fmr_gdf, image_path, image_type)
+            return jsonify(processing_result)
+        
+        else:
+            return jsonify({"status": "error", "message": "Invalid workflow type"}), 400
+        
+    except Exception as e:
+        return jsonify({"status": "error", "message": str(e)}), 500
 
 ## processing function
-def processing(vector_gdf, raster_path, image_type):
+def automatic_processing(vector_gdf, raster_path, image_type):
     results = {}
     raster_directory = os.path.dirname(raster_path)
     master_directory = os.path.dirname(raster_directory)
-    output_folder = os.path.dirname(os.path.dirname(raster_path))
+    output_folder = os.path.join(os.path.dirname(os.path.dirname(master_directory)), "Outputs")
 
     try:
+        # FIX: Ensure vector_gdf has a CRS before any operations
+        if vector_gdf.crs is None:
+            # Set appropriate CRS - adjust EPSG code based on your data
+            vector_gdf = vector_gdf.set_crs('EPSG:32651')  # WGS84 as default
+            print("Warning: No CRS found, setting to EPSG:32651")
+        
         preprocessor = Preprocessing()
-        preprocessor.reproject(raster_path)
+        preprocessor.reproject(raster_path, vector_gdf)
         
         if image_type == 'BSG':
-            int, tol, res = 3, 0.4, 0.3
-            preprocessor.reproject(raster_path)
+            int, tol, res = 3, 0.15, 0.3
 
-            clipped_data, clipped_transform = preprocessor.clipraster(vector_data=vector_gdf, buffer_dist=30) #bbox=False
+            clipped_data, clipped_transform = preprocessor.clipraster(vector_data=vector_gdf, buffer_dist=25) #bbox=False
 
             filter = Filters()
             warm_raster = filter.enhance_image_warmth(clipped_data)
             stretch_raster = filter.enhance_linear_stretch(clipped_data)
 
             morph = Morph()
-            morph_warm = morph.process(warm_raster)
-            morph_stretch = morph.process(stretch_raster)
+            morph_warm = morph.process(warm_raster, a=4, b=3, ite1=2, ite2=3)
+            morph_stretch = morph.process(stretch_raster, a=4, b=3, ite1=2, ite2=3)
 
             merged_or = np.logical_or(morph_warm, morph_stretch)
             initial_binary_raster = merged_or
 
         if image_type == 'PNEO':
-            int, tol, res = 3, 0.15, 0.3 
+            int, tol, res = 3, 0.15, 0.3
+
             clipped_data, clipped_transform = preprocessor.clipraster(vector_data=vector_gdf, bbox=True)
 
             filter = Filters()
@@ -165,21 +174,36 @@ def processing(vector_gdf, raster_path, image_type):
         final_binary_transform = clipped_transform
 
         # plt.imshow(final_clipped_data, cmap="gray")
-        final_binary_raster = morph.remove_small_islands(initial_binary_raster, min_size=1000)
+        final_binary_raster = morph.remove_small_islands(initial_binary_raster, min_size=500)
+        final_binary_raster = np.squeeze(final_binary_raster)
         final_binary_raster = cv2.morphologyEx(final_binary_raster.astype(np.uint8), cv2.MORPH_CLOSE, np.ones((3,3), np.uint8), iterations=3)
 
         measure = MeasureWidth(final_binary_raster, final_binary_transform, vector_gdf)
         transects = measure.process(int=int, tol=tol, res=res)
         road_polygon = measure.generate_polygon() #export??
-    
+
+        ## NEED TO ADD EXPORT lines here on designated folder...
+
+        final_binary_raster, final_binary_transform = preprocessor.clipraster(
+                            raster_data = final_binary_raster.astype(np.uint8),
+                            vector_data = vector_gdf,
+                            transform = clipped_transform,
+                            buffer_dist = 3)
+        final_binary_raster = np.squeeze(final_binary_raster)
+
         final_line = measure_line(final_binary_raster, final_binary_transform, spacing=3)
 
         if final_line is not None and not final_line.empty:
             final_line_length = final_line.length.values[0]
-            vector_length = vector_gdf.geometry.length
+            
+            # FIX: Ensure CRS is set before transformation
+            if vector_gdf.crs is None:
+                vector_gdf = vector_gdf.set_crs('EPSG:32651')
+            
+            vector_length = vector_gdf.to_crs("EPSG:32651").length.sum()
             
             results['Actual Length'] = float(final_line_length)
-            results['Planned Length'] = vector_length
+            results['Planned Length'] = float(vector_length)
             results['FMR progress'] = (final_line_length / vector_length) * 100
             results['Average Road Width'] = float(transects['width'].mean())
 
@@ -188,7 +212,7 @@ def processing(vector_gdf, raster_path, image_type):
             results['Planned Length'] = None
             results['FMR Progress'] = None
             results['Average Road Width'] = None
-            results['message'] += ' - No road line detected'
+            results['message'] = 'No road line detected'
 
         #add export lines here later 
 
@@ -203,11 +227,79 @@ def processing(vector_gdf, raster_path, image_type):
             "message": str(e)
         }
 
+def manual_processing(manual_fmrs, image_type):
+    raster_folder = bsg_folder if image_type == "BSG" else pneo_folder
+
+    if not manual_fmrs:
+        return {"status": "error", "message": "No manual FMRs provided"}, 400
+
+    results = []
+
+    for item in manual_fmrs:
+        name = item.get("name")
+        geometry = item.get("geometry")
+        if not name or not geometry:
+            results.append({
+                "fmr_name": name or "Unnamed",
+                "status": "error",
+                "message": "Missing name or geometry."
+            })
+            continue
+
+        drawn_gdf = gpd.GeoDataFrame.from_features([{
+            "type": "Feature",
+            "properties": {},
+            "geometry": geometry
+        }], crs="EPSG:4326").to_crs("EPSG:32651")
+
+        matched_image = None
+        for tif_file in os.listdir(raster_folder):
+            if not tif_file.endswith(".tif"):
+                continue
+            tif_path = os.path.join(raster_folder, tif_file)
+            with rasterio.open(tif_path) as src:
+                bounds = box(*src.bounds)
+                bounds = gpd.GeoSeries([bounds], crs=src.crs).to_crs("EPSG:32651").iloc[0]
+                if drawn_gdf.geometry.iloc[0].intersects(bounds):
+                    matched_image = tif_path
+                    break
+
+        if not matched_image:
+            results.append({
+                "fmr_name": name,
+                "status": "error",
+                "message": "No matching image found"
+            })
+            continue
+
+        try:
+            fmr_id = f"manual_{name.replace(' ', '_')}"
+            province = "Manual"
+            process_result = processing(
+                drawn_gdf,
+                matched_image,
+                image_type,
+                fmr_id,
+                province,
+                name
+            )
+            process_result["fmr_name"] = name
+            results.append(process_result)
+
+        except Exception as e:
+            import traceback
+            traceback.print_exc()
+            results.append({
+                "fmr_name": name,
+                "status": "error",
+                "message": str(e)
+            })
+
+    return {"status": "success", "results": results}, 200
 
 # ==========================================================
 # Original Flask Routes
 # ==========================================================
-
 def getDatabase():
     """Efficiently scan FMR and BSG images, log all raster-FMR matches (1 row per match), sorted numerically by FMR index and date. Skips entries that are already in the database."""
 
@@ -381,7 +473,7 @@ def stretch_band(band, lower_percent=2, upper_percent=98):
     lower = np.percentile(band, lower_percent)
     upper = np.percentile(band, upper_percent)
 
-    # 🛡️ Prevent divide-by-zero error
+    # Prevent divide-by-zero error
     if upper == lower:
         return np.zeros_like(band, dtype=np.float32)
 
@@ -392,19 +484,18 @@ def stretch_band(band, lower_percent=2, upper_percent=98):
 def create_image_preview(image_path, fmr_gdf):
     try:
         preprocessor = Preprocessing()
-        _,_, rep_crs, _ = preprocessor.reproject(image_path)
+        rep_data, rep_transform, rep_crs = preprocessor.reproject(image_path, fmr_gdf)
         clipped_data, clipped_transform = preprocessor.clipraster(vector_data=fmr_gdf, buffer_dist=25, bbox=True)
         
         height, width = clipped_data.shape[1:]
-        top_left = xy(clipped_transform, 1, 0, offset='ul')  # Upper-left corner
-        bottom_right = xy(clipped_transform, height - 1, width - 1, offset='lr')  # Lower-right corner
+        top_left = xy(clipped_transform, 1, 0, offset='ul')
+        bottom_right = xy(clipped_transform, height - 1, width - 1, offset='lr')
 
         transformer = Transformer.from_crs(rep_crs, "EPSG:4326", always_xy=True)
         minx, miny = transformer.transform(*top_left)
         maxx, maxy = transformer.transform(*bottom_right)
-
         image_bounds = [[miny, minx], [maxy, maxx]]
-        
+
         rgb = np.stack([
             np.clip(clipped_data[0], 0, 255) / 255,
             np.clip(clipped_data[1], 0, 255) / 255,
@@ -420,12 +511,14 @@ def create_image_preview(image_path, fmr_gdf):
         image_base64 = base64.b64encode(buf.read()).decode('utf-8')
 
         return {
-            "base64": image_base64, 
+            "base64": image_base64,
             "bounds": image_bounds
         }
-        
+
     except Exception as e:
-        return jsonify({"status": "error", "message": str(e)}), 500    
+        import traceback
+        traceback.print_exc()
+        raise RuntimeError(f"create_image_preview failed: {str(e)}")
     
 ## ==========================================================
 
@@ -462,6 +555,7 @@ def get_matching_images():
 
     return jsonify({"status": "success", "images": images})
 
+## Added 07/28 2:04; for image-available FMR visibility
 @app.route('/get_fmrs_with_images', methods=['GET'])
 def get_fmrs_with_images():
     fmr_db_file = os.path.join(os.path.dirname(shapefile_path), "fmr_database.csv")
@@ -479,7 +573,7 @@ def get_fmrs_with_images():
 
 @app.route('/')
 def serve_map():
-    return send_file(r"C:\Users\HP\Desktop\BAFE FMR\fmr_interactive_map.html")  
+    return send_file(r"C:\Users\user-307E123400\Desktop\BAFE FMR\fmr_interactive_map.html")  # Path changed aina
 
 
 @app.route('/select', methods=['POST'])
@@ -638,34 +732,30 @@ def display_selected_image():
     try:
         if fmr_id not in gdf.index:
             return jsonify({"status": "error", "message": f"FMR ID {fmr_id} not found"}), 400
-        
+
         fmr_geometry = gdf.loc[fmr_id].geometry
-        
         fmr_gdf = gpd.GeoDataFrame({"geometry": [fmr_geometry]}, crs="EPSG:4326")
-          
-        # print(f"Processing FMR {fmr_id} with image {image_path}")
-        # print(f"FMR geometry CRS: {fmr_gdf.crs}")
-        
-        # Create image preview
+
+        # Call preview function
         preview = create_image_preview(image_path, fmr_gdf)
-        
-        if preview:
-            return jsonify({
-                "status": "success",
-                "image_data": preview["base64"],
-                "bounds": preview["bounds"],
-                "fmr_id": fmr_id,
-                "image_path": image_path
-            })
-        else:
-            return jsonify({"status": "error", "message": "Failed to create image preview"}), 500
-            
+
+        # Handle tuple (error) case
+        if isinstance(preview, tuple):
+            return preview  # Already a response
+
+        return jsonify({
+            "status": "success",
+            "image_data": preview["base64"],
+            "bounds": preview["bounds"],
+            "fmr_id": fmr_id,
+            "image_path": image_path
+        })
+
     except Exception as e:
-        print(f"Error in display_image: {e}")
         import traceback
         traceback.print_exc()
         return jsonify({"status": "error", "message": str(e)}), 500
-    
+
 # @app.route('/get_fmr_metadata', methods=['POST'])
 # def get_fmr_metadata():
 #     data = request.get_json()
@@ -702,7 +792,7 @@ def create_fmr_map(input_gdf=None):
         except Exception as e:
             print(f"Error loading FMR database: {e}")
 
-    center = map_gdf.union_all().centroid
+    center = map_gdf.unary_union.centroid
     fmap = folium.Map(location=[center.y, center.x], zoom_start=10, tiles="Esri.WorldImagery")
 
     geo_layer_var_lines = []
@@ -761,12 +851,12 @@ def create_fmr_map(input_gdf=None):
     province_options = "".join([f"<option value='{p}'>{p}</option>" for p in provinces])
 
     js_ui = f"""
-        <link rel="stylesheet" href="https://unpkg.com/leaflet-draw/dist/leaflet.draw.css" />
-        <script src="https://unpkg.com/leaflet-draw/dist/leaflet.draw.js"></script>
-        <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css" integrity="sha512-papER...=="
-            crossorigin="anonymous" referrerpolicy="no-referrer" />
-        <script src="/static/fmr_ui_script.js"></script>
-
+        <link rel=\"stylesheet\" href=\"https://unpkg.com/leaflet-draw/dist/leaflet.draw.css\" />
+        <script src=\"https://unpkg.com/leaflet-draw/dist/leaflet.draw.js\"></script>
+        <link rel=\"stylesheet\" href=\"https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css\" integrity=\"sha512-papER...==\"
+            crossorigin=\"anonymous\" referrerpolicy=\"no-referrer\" />
+        <script src=\"/static/fmr_ui_script.js\"></script>
+        
         <style>
             #selection-panel {{
                 position: fixed;
@@ -892,62 +982,71 @@ def create_fmr_map(input_gdf=None):
         </style>
 
         <!------------ Selection Panel ------------>
-        <div id="selection-panel">
+        <div id=\"selection-panel\">
             <b>Province Filter:</b>
-            <select id="provinceSelect" onchange="filterByProvince()">
-                <option value="All">All</option>
+            <select id=\"provinceSelect\" onchange=\"filterByProvince()\">
+                <option value=\"All\">All</option>
                 {province_options}
             </select>
             <b>Selected FMR(s):</b>
-            <ul id="fmr-list"></ul>
-            <button id="runBtn" onclick="showProcessingModal()" disabled>Run</button>
-            <button onclick="downloadSelected()">Export Selected</button>
-            <button class="clear-btn" onclick="clearSelections()">Clear</button>
-            <button onclick="updateFMRs()">Update FMR</button>
-            <div id="dynamic-processing-panel" style="margin-top: 20px;"></div>
+            <ul id=\"fmr-list\"></ul>
+            <button id=\"runBtn\" onclick=\"showProcessingModal()\" disabled>Run</button>
+            <button onclick=\"downloadSelected()\">Export Selected</button>
+            <button class=\"clear-btn\" onclick=\"clearSelections()\">Clear</button>
+            <button onclick=\"updateFMRs()\">Update FMR</button>
+            <div id=\"dynamic-processing-panel\" style=\"margin-top: 20px;\"></div>
         </div>
 
         <!-- Processing Modal -->
-        <div id="processing-modal">
-            <div id="processing-modal-content">
+        <div id=\"processing-modal\">
+            <div id=\"processing-modal-content\">
                 <h3>Processing Options</h3>
 
-                <div class="option-group">
+                <div class=\"option-group\">
                     <strong>Process:</strong>
-                    <label><input type="radio" name="process-type" value="selected" checked> Selected images only</label>
-                    <label><input type="radio" name="process-type" value="all"> All images</label>
+                    <label><input type=\"radio\" name=\"process-type\" value=\"selected\" checked> Selected images only</label>
+                    <label><input type=\"radio\" name=\"process-type\" value=\"all\"> All images</label>
                 </div>
 
-                <div class="option-group">
+                <div class=\"option-group\">
                     <strong>Workflow Type:</strong>
-                    <label><input type="radio" name="workflow-type" value="manual"> Manual</label>
-                    <label><input type="radio" name="workflow-type" value="automatic" checked> Automatic</label>
+                    <label><input type=\"radio\" name=\"workflow-type\" value=\"manual\" onchange=\"toggleManualSection()\"> Manual</label>
+                    <label><input type=\"radio\" name=\"workflow-type\" value=\"automatic\" onchange=\"toggleManualSection()\" checked> Automatic</label>
                 </div>
 
-                <div class="option-group">
+                <!-- Manual Drawing UI -->
+                <div id=\"manual-fmr-section\" style=\"display: none; margin-top: 10px;\">
+                    <strong>Draw FMR Centerlines:</strong>
+                    <div id=\"manual-fmr-container\" style=\"margin-bottom: 10px;\"></div>
+                    <button type=\"button\" onclick=\"addManualFMRRow()\">+ Draw additional FMR</button>
+                </div>
+
+                <div class=\"option-group\">
                     <strong>Image Type:</strong>
-                    <select id="image-type">
-                        <option value="BSG">BSG</option>
-                        <option value="PNEO">PNEO</option>
+                    <select id=\"image-type\">
+                        <option value=\"BSG\">BSG</option>
+                        <option value=\"PNEO\">PNEO</option>
                     </select>
                 </div>
 
-                <div class="modal-buttons">
-                    <button id="cancel-processing" onclick="hideProcessingModal()">Cancel</button>
-                    <button id="run-processing" onclick="runProcessing()">Run</button>
+                <div class=\"modal-buttons\">
+                    <button id=\"cancel-processing\" onclick=\"hideProcessingModal()\">Cancel</button>
+                    <button id=\"run-processing\" onclick=\"runProcessing()\">Run</button>
                 </div>
             </div>
         </div>
 
-        <!------- Image Toggle Button (Leaflet top-right) ------->
-        <div class="leaflet-top leaflet-right">
-            <div class="leaflet-control leaflet-bar leaflet-control-image-toggle" title="Show FMRs with Satellite Images" onclick="toggleImageVisibility(this)">
-                <i class="fas fa-image"></i>
+        <!-- Image Toggle Button (Leaflet top-right) -->
+        <div class=\"leaflet-top leaflet-right\">
+            <div class=\"leaflet-control leaflet-bar leaflet-control-image-toggle\" title=\"Show FMRs with Satellite Images\" onclick=\"toggleImageVisibility(this)\">
+                <i class=\"fas fa-image\"></i>
             </div>
         </div>
     """
 
+
     fmap.get_root().html.add_child(folium.Element(js_ui))
+
     fmap.get_root().html.add_child(folium.Element(f"""
         <script>
             L.Map.addInitHook(function () {{
@@ -967,7 +1066,7 @@ def create_fmr_map(input_gdf=None):
         </script>
     """))
 
-    html_path = "C:/Users/HP/Desktop/BAFE FMR/fmr_interactive_map.html"
+    html_path = "C:/Users/user-307E123400/Desktop/BAFE FMR/fmr_interactive_map.html"
     fmap.save(html_path)
     print("Interactive FMR map created: fmr_interactive_map.html")
     return os.path.abspath(html_path)
