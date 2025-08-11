@@ -12,8 +12,7 @@ import rasterio
 import numpy as np
 import PIL
 import base64
-
-from shapely.geometry import box
+from shapely.geometry import box, shape
 from shapely.ops import transform as shapely_transform
 from pyproj import Transformer
 from datetime import datetime
@@ -27,7 +26,7 @@ from flask_cors import CORS
 from waitress import serve
 from io import BytesIO
 
-from utilv1 import Preprocessing, Filters, Morph, MeasureWidth, measure_line, Interaction, export
+from utilv2 import Preprocessing, Filters, Morph, MeasureWidth, measure_line, Interaction, export
 
 import matplotlib
 matplotlib.use("Agg")
@@ -63,7 +62,7 @@ def process_fmr():
     manual_fmr = data.get("manual_fmr")  # For manual workflow
     
     fmr_db_file = os.path.join(os.path.dirname(shapefile_path), "fmr_database_aina.csv")
-    
+
     global selected_features, gdf
 
     # Validate required parameters based on workflow type
@@ -90,7 +89,6 @@ def process_fmr():
             
             # Create GeoDataFrame from manual FMR geometry
             try:
-                from shapely.geometry import shape
                 geom = shape(manual_fmr['geometry'])
                 fmr_gdf = gpd.GeoDataFrame({'geometry': [geom], 'name': [manual_fmr['name']]}, crs='EPSG:4326')
             except Exception as e:
@@ -153,6 +151,18 @@ def process_fmr():
 
             processing_result = processing(fmr_gdf, image_path, image_type)
             
+            df = pd.read_csv(fmr_db_file)
+            # processing_result (dict) : call the result and update the fmr_db_file == df
+            processing_result['FMR'] = fmr_id
+            results_df = pd.DataFrame([processing_result])
+            results_df = results_df.set_index('FMR')
+            df = df.set_index('FMR')
+
+            df.update(results_df)
+            df.reset_index(inplace=True)
+            
+            df.to_csv(fmr_db_file)
+
         else:
             return jsonify({
                 "status": "error", 
@@ -244,17 +254,20 @@ def processing(vector_gdf, raster_path, image_type):
                 vector_gdf = vector_gdf.set_crs('EPSG:32651')
             
             vector_length = vector_gdf.to_crs("EPSG:32651").length.sum()
-            
-            results['Actual Length'] = float(final_line_length)
-            results['Planned Length'] = float(vector_length)
-            results['FMR progress'] = (final_line_length / vector_length) * 100
-            results['Average Road Width'] = float(transects['width'].mean())
+            progress = (final_line_length / vector_length) * 100
+
+            results['Current FMR Length'] = float(final_line_length) #"Current FMR Length"
+            results['Planned FMR Length'] = float(vector_length) 
+            results['FMR progress'] = progress # "FMR Progress"
+            results['FMR Status'] = "Completed" if progress > 90 else "On-going" #will need to decide the best threshold value for this
+            results['Mean FMR Width'] = float(transects['width'].mean()) #"Mean Road Width" ## to add this column to the CSV
 
         else:
-            results['Actual Length'] = None
-            results['Planned Length'] = None
+            results['Current FMR Length'] = None
+            results['Planned FMR Length'] = None
             results['FMR Progress'] = None
-            results['Average Road Width'] = None
+            results['Mean FMR Width'] = None
+            results['FMR Status'] = "Completed" if progress > 90 else "On-going"
             results['message'] = 'No road line detected'
 
         #add export lines here later 
@@ -273,7 +286,7 @@ def processing(vector_gdf, raster_path, image_type):
 def manual_processing(manual_fmrs, image_type):
     ##raster_folder should contain all the images already
     ##no distinction of images
-    raster_folder = bsg_folder if image_type == "BSG" else pneo_folder  
+    raster_folder = bsg_folder
 
     if not manual_fmrs:
         return {"status": "error", "message": "No manual FMRs provided"}, 400
@@ -427,6 +440,8 @@ def getDatabase():
                     "Planned FMR Length": planned_length,
                     "Current FMR Length": "",
                     "FMR Progress": "",
+                    "FMR Status": "", #08/07: COMPLETED/ON-GOING
+                    "Mean FMR Width": "", #08/07
                     "Image Path": data["path"]
                 })
 
@@ -445,6 +460,8 @@ def getDatabase():
                     "Planned FMR Length": planned_length,
                     "Current FMR Length": "",
                     "FMR Progress": "",
+                    "FMR Status": "", #08/07
+                    "Mean FMR Width": "", #08/07
                     "Image Path": ""
                 })
 
@@ -459,7 +476,7 @@ def getDatabase():
     results_df["FMR_INDEX"] = results_df["FMR"].str.extract(r"(\d+)", expand=False).astype(int)
 
     # Ensure 'Date' is datetime for proper sorting
-    results_df["Date"] = pd.to_datetime(results_df["Date"], errors="coerce")
+    results_df["Date"] = pd.to_datetime(results_df["Date"], errors="coerce") 
 
     # === Part 4: Append and sort ===
     if not existing_df.empty:
@@ -527,7 +544,7 @@ def stretch_band(band, lower_percent=2, upper_percent=98):
     return stretched
 
 
-def create_image_preview(image_path, fmr_gdf):
+def create_image_preview(image_path, fmr_gdf): 
     try:
         preprocessor = Preprocessing()
         _,_, rep_crs, _ = preprocessor.reproject(image_path)
@@ -770,6 +787,7 @@ def display_selected_image():
     data = request.get_json()
     fmr_id = data.get("fmr_id")
     image_path = data.get("image_path")
+    image_name = data.get("BSG")
 
     if not os.path.exists(image_path):
         return jsonify({"status": "error", "message": "Image file not found."}), 404
@@ -794,6 +812,7 @@ def display_selected_image():
                 "image_data": preview["base64"],
                 "bounds": preview["bounds"],
                 "fmr_id": fmr_id,
+                "image_name": image_name,
                 "image_path": image_path
             })
         else:
@@ -804,24 +823,6 @@ def display_selected_image():
         import traceback
         traceback.print_exc()
         return jsonify({"status": "error", "message": str(e)}), 500
-
-# @app.route('/get_fmr_metadata', methods=['POST'])
-# def get_fmr_metadata():
-#     data = request.get_json()
-#     fmr_id = data.get("fmr_id")
-
-#     if fmr_id is None or fmr_id not in gdf.index:
-#         return jsonify({"status": "error", "message": "Invalid FMR ID"}), 400
-
-#     row = gdf.loc[fmr_id]
-#     return jsonify({
-#         "status": "success",
-#         "fmr_id": fmr_id,
-#         "name": row.get("name", f"FMR_{fmr_id}"),
-#         "barangay": row.get("BRGY_NAME", "N/A"),
-#         "municipality": row.get("MUN_NAME", "N/A"),
-#         "province": row.get("PROV_NAME", "N/A")
-#     })
 
 def run_flask():
     """Run the Flask app using Waitress."""
@@ -1046,35 +1047,43 @@ def create_fmr_map(input_gdf=None):
             <div id="dynamic-processing-panel" style="margin-top: 20px;"></div>
         </div>
 
+        <!-- 08/05: Fixing polyline issue on whole Processing Modal. Added back the backlashes. Escape sequence error? -->
         <!-- Processing Modal -->
-        <div id="processing-modal">
-            <div id="processing-modal-content">
+        <div id=\"processing-modal\">
+            <div id=\"processing-modal-content\">
                 <h3>Processing Options</h3>
 
-                <div class="option-group">
+                <div class=\"option-group\">
                     <strong>Process:</strong>
-                    <label><input type="radio" name="process-type" value="selected" checked> Selected images only</label>
-                    <label><input type="radio" name="process-type" value="all"> All images</label>
+                    <label><input type=\"radio\" name=\"process-type\" value=\"selected\" checked> Selected images only</label>
+                    <label><input type=\"radio\" name=\"process-type\" value=\"all\"> All images</label>
                 </div>
 
-                <div class="option-group">
+                <div class=\"option-group\">
                     <strong>Workflow Type:</strong>
-                    <label><input type="radio" name="workflow-type" value="manual"> Manual</label>
-                    <label><input type="radio" name="workflow-type" value="automatic" checked> Automatic</label>
+                    <label><input type=\"radio\" name=\"workflow-type\" value=\"manual\" onchange=\"toggleManualSection()\"> Manual</label>
+                    <label><input type=\"radio\" name=\"workflow-type\" value=\"automatic\" onchange=\"toggleManualSection()\" checked> Automatic</label>
                 </div>
 
-                <div class="option-group">
+                <!-- Manual Drawing UI -->
+                <div id=\"manual-fmr-section\" style=\"display: none; margin-top: 10px;\">
+                    <strong>Draw FMR Centerlines:</strong>
+                    <div id=\"manual-fmr-container\" style=\"margin-bottom: 10px;\"></div>
+                    <button type=\"button\" onclick=\"addManualFMRRow()\">+ Draw additional FMR</button>
+                </div>
+
+                <div class=\"option-group\">
                     <strong>Image Type:</strong>
-                    <select id="image-type">
-                        <option value="BSG">BSG</option>
-                        <option value="PNEO">PNEO</option>
-                        <option value="SkySat">SkySat</option>
+                    <select id=\"image-type\">
+                        <option value=\"BSG\">BSG</option>
+                        <option value=\"PNEO\">PNEO</option>
+                        <option value=\"SkySat\">PNEO</option>
                     </select>
                 </div>
 
-                <div class="modal-buttons">
-                    <button id="cancel-processing" onclick="hideProcessingModal()">Cancel</button>
-                    <button id="run-processing" onclick="runProcessing()">Run</button>
+                <div class=\"modal-buttons\">
+                    <button id=\"cancel-processing\" onclick=\"hideProcessingModal()\">Cancel</button>
+                    <button id=\"run-processing\" onclick=\"runProcessing()\">Run</button>
                 </div>
             </div>
         </div>

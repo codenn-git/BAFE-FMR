@@ -397,11 +397,46 @@ function runProcessing() {
             alert("Please complete all drawn FMRs and name them.");
             return;
         }
+        // 08/06
+         // Get selected images based on process type
+        const imagesToProcess = [];
+        
+        if (processType === 'selected') {
+            // Find all checked image checkboxes
+            document.querySelectorAll('.image-checkbox:checked').forEach(checkbox => {
+                imagesToProcess.push({
+                    fmr_id: parseInt(checkbox.dataset.fmrId),
+                    image_path: checkbox.dataset.imagePath
+                });
+            });
+            
+            if (imagesToProcess.length === 0) {
+                alert('Please select at least one image to process');
+                return;
+            }
+        } else {
+            // Process all images for selected FMRs
+            fmrIds.forEach(fmrId => {
+                const images = currentMatchingImages[fmrId] || [];
+                images.forEach(img => {
+                    imagesToProcess.push({
+                        fmr_id: fmrId,
+                        image_path: img.path
+                    });
+                });
+            });
+        }
+        
+        if (imagesToProcess.length === 0) {
+            alert('No images found to process');
+            return;
+        }
 
         // Process each manual FMR
         manualFMRs.forEach(manualFMR => {
-            processFMR(manualFMR.id, null, workflowType, imageType, manualFMR);
+            processFMR(manualFMR.id, null /* 08/06: need to access the image_path here for processing */, workflowType, imageType, manualFMR);
         });
+
     } else if (workflowType === "automatic") {
         // Get selected FMR IDs
         const fmrIds = Array.from(selectedIds);
@@ -597,7 +632,7 @@ function removeManualFMRRow(index) {
 function drawManualLine(index) {
     if (!window._map) return;
 
-    toggleDrawingUI(true); // 🔍 Hide everything except map
+    toggleDrawingUI(true); // Hide everything except map // only hides the UI, will need to hide the selected FMR as well
 
     if (!window._drawControl) {
         window._drawControl = new L.Control.Draw({
