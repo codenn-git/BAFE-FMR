@@ -1,3 +1,5 @@
+# added another style in js_ui
+
 import sys
 import os
 import re
@@ -12,8 +14,7 @@ import rasterio
 import numpy as np
 import PIL
 import base64
-
-from shapely.geometry import box
+from shapely.geometry import box, shape
 from shapely.ops import transform as shapely_transform
 from pyproj import Transformer
 from datetime import datetime
@@ -27,7 +28,7 @@ from flask_cors import CORS
 from waitress import serve
 from io import BytesIO
 
-from utilv1 import Preprocessing, Filters, Morph, MeasureWidth, measure_line, Interaction, export
+from utilv2 import Preprocessing, Filters, Morph, MeasureWidth, measure_line, Interaction, export
 
 import matplotlib
 matplotlib.use("Agg")
@@ -62,8 +63,8 @@ def process_fmr():
     image_path = data.get("image_path")
     manual_fmr = data.get("manual_fmr")  # For manual workflow
     
-    fmr_db_file = os.path.join(os.path.dirname(shapefile_path), "fmr_database.csv")
-    
+    fmr_db_file = os.path.join(os.path.dirname(shapefile_path), "fmr__database.csv")
+
     global selected_features, gdf
 
     # Validate required parameters based on workflow type
@@ -90,7 +91,6 @@ def process_fmr():
             
             # Create GeoDataFrame from manual FMR geometry
             try:
-                from shapely.geometry import shape
                 geom = shape(manual_fmr['geometry'])
                 fmr_gdf = gpd.GeoDataFrame({'geometry': [geom], 'name': [manual_fmr['name']]}, crs='EPSG:4326')
             except Exception as e:
@@ -99,9 +99,6 @@ def process_fmr():
                     "message": f"Invalid geometry in manual FMR: {str(e)}"
                 }), 400
             
-            # For manual workflow, image_path should be handled differently
-            # You might want to determine image_path based on the drawn geometry
-            # For now, using a default or let the processing function handle it
             processing_result = processing(fmr_gdf, image_path, image_type)
             
         elif workflow_type == 'automatic':
@@ -119,12 +116,14 @@ def process_fmr():
                     "message": f"FMR ID {fmr_id} is not selected"
                 }), 400
             
+            # Get FMR name for database lookup
+            fmr_name = str(gdf.loc[fmr_id].get("name", f"FMR_{fmr_id}"))
+            
             # Handle image path validation and recovery
             if not image_path:
                 # Try to recover image path from database if missing
                 if os.path.exists(fmr_db_file):
                     fmr_database = pd.read_csv(fmr_db_file)
-                    fmr_name = str(gdf.loc[fmr_id].get("name", f"FMR_{fmr_id}"))
                     fmr_entry = fmr_database[fmr_database["FMR"] == fmr_name]
                     if not fmr_entry.empty and pd.notna(fmr_entry.iloc[0].get("Image Path")):
                         image_paths = fmr_entry.iloc[0]["Image Path"].split(", ")
@@ -153,6 +152,39 @@ def process_fmr():
 
             processing_result = processing(fmr_gdf, image_path, image_type)
             
+            # Update database with results
+            if processing_result.get("status") == "success" and os.path.exists(fmr_db_file):
+                try:
+                    df = pd.read_csv(fmr_db_file)
+                    
+                    # Extract results from the processing result
+                    results = processing_result.get("results", {})
+                    
+                    # Find the row(s) to update based on FMR name and image path
+                    mask = (df["FMR"] == fmr_name) & (df["Image Path"] == image_path)
+                    
+                    if mask.any():
+                        # Update existing rows
+                        for column, value in results.items():
+                            if column in df.columns and value is not None:
+                                df.loc[mask, column] = value
+                    else:
+                        # If no exact match found, update all rows with matching FMR name
+                        mask = df["FMR"] == fmr_name
+                        if mask.any():
+                            for column, value in results.items():
+                                if column in df.columns and value is not None:
+                                    df.loc[mask, column] = value
+                    
+                    # Save the updated database
+                    df.to_csv(fmr_db_file, index=False)
+                    print(f"Database updated for FMR: {fmr_name}")
+                    
+                except Exception as e:
+                    print(f"Error updating database: {str(e)}")
+                    # Don't fail the entire request if database update fails
+                    processing_result["database_update_error"] = str(e)
+
         else:
             return jsonify({
                 "status": "error", 
@@ -167,7 +199,7 @@ def process_fmr():
             "status": "error", 
             "message": f"Processing failed: {str(e)}"
         }), 500
-    
+
 ## processing function
 ## this function will be used for the manual processing; since input should be the same,
 ## except: drawn_line (vector_gdf)
@@ -236,25 +268,36 @@ def processing(vector_gdf, raster_path, image_type):
 
         final_line = measure_line(final_binary_raster, final_binary_transform, spacing=3)
 
+        # FIX: Ensure CRS is set before transformation
+        if vector_gdf.crs is None:
+            vector_gdf = vector_gdf.set_crs('EPSG:32651')
+        
+        vector_length = vector_gdf.to_crs("EPSG:32651").length.sum()
+
         if final_line is not None and not final_line.empty:
             final_line_length = final_line.length.values[0]
-            
-            # FIX: Ensure CRS is set before transformation
-            if vector_gdf.crs is None:
-                vector_gdf = vector_gdf.set_crs('EPSG:32651')
-            
-            vector_length = vector_gdf.to_crs("EPSG:32651").length.sum()
-            
-            results['Actual Length'] = float(final_line_length)
-            results['Planned Length'] = float(vector_length)
-            results['FMR progress'] = (final_line_length / vector_length) * 100
-            results['Average Road Width'] = float(transects['width'].mean())
+            progress = (final_line_length / vector_length) * 100
+
+            if progress > 90:
+                progress_status = "Completed"
+            elif progress == 0:
+                progress_status = "Not Started"
+            else:
+                progress_status = "On-going"
+
+            results['Current FMR Length'] = float(final_line_length)
+            results['Planned FMR Length'] = float(vector_length) 
+            results['FMR Progress'] = float(progress)
+            results['FMR Status'] = progress_status
+            results['Mean FMR Width'] = float(transects['width'].mean()) if not transects.empty else None
 
         else:
-            results['Actual Length'] = None
-            results['Planned Length'] = None
+            progress = 0  # when no road is detected
+            results['Current FMR Length'] = None
+            results['Planned FMR Length'] = float(vector_length)
             results['FMR Progress'] = None
-            results['Average Road Width'] = None
+            results['Mean FMR Width'] = None
+            results['FMR Status'] = "Not Started"  # status when no road detected
             results['message'] = 'No road line detected'
 
         #add export lines here later 
@@ -273,7 +316,7 @@ def processing(vector_gdf, raster_path, image_type):
 def manual_processing(manual_fmrs, image_type):
     ##raster_folder should contain all the images already
     ##no distinction of images
-    raster_folder = bsg_folder if image_type == "BSG" else pneo_folder  
+    raster_folder = bsg_folder
 
     if not manual_fmrs:
         return {"status": "error", "message": "No manual FMRs provided"}, 400
@@ -351,7 +394,7 @@ def getDatabase():
 
     master_fmr = shapefile_path
     bsg_folder_path = bsg_folder
-    fmr_db_file = os.path.join(os.path.dirname(master_fmr), "fmr_database.csv")
+    fmr_db_file = os.path.join(os.path.dirname(master_fmr), "fmr__database.csv")
 
     # Load FMRs in EPSG:32651
     fmr_gdf = gpd.read_file(master_fmr).to_crs("EPSG:32651")
@@ -427,6 +470,8 @@ def getDatabase():
                     "Planned FMR Length": planned_length,
                     "Current FMR Length": "",
                     "FMR Progress": "",
+                    "FMR Status": "", #08/07: COMPLETED/ON-GOING
+                    "Mean FMR Width": "", #08/07
                     "Image Path": data["path"]
                 })
 
@@ -445,6 +490,8 @@ def getDatabase():
                     "Planned FMR Length": planned_length,
                     "Current FMR Length": "",
                     "FMR Progress": "",
+                    "FMR Status": "", #08/07
+                    "Mean FMR Width": "", #08/07
                     "Image Path": ""
                 })
 
@@ -459,7 +506,7 @@ def getDatabase():
     results_df["FMR_INDEX"] = results_df["FMR"].str.extract(r"(\d+)", expand=False).astype(int)
 
     # Ensure 'Date' is datetime for proper sorting
-    results_df["Date"] = pd.to_datetime(results_df["Date"], errors="coerce")
+    results_df["Date"] = pd.to_datetime(results_df["Date"], errors="coerce") 
 
     # === Part 4: Append and sort ===
     if not existing_df.empty:
@@ -530,8 +577,7 @@ def stretch_band(band, lower_percent=2, upper_percent=98):
 def create_image_preview(image_path, fmr_gdf): 
     try:
         preprocessor = Preprocessing()
-        # 08/05: cause of tuple error in display image
-        rep_data, rep_transform, rep_crs = preprocessor.reproject(image_path, fmr_gdf)
+        _,_, rep_crs, _ = preprocessor.reproject(image_path)
         clipped_data, clipped_transform = preprocessor.clipraster(vector_data=fmr_gdf, buffer_dist=25, bbox=True)
         
         height, width = clipped_data.shape[1:]
@@ -573,7 +619,7 @@ def get_matching_images():
     data = request.json
     fmr_id = data.get("fmr_id")
     fmr_name = str(gdf.loc[fmr_id].get("name", f"FMR_{fmr_id}"))
-    fmr_db_file = os.path.join(os.path.dirname(shapefile_path), "fmr_database.csv")
+    fmr_db_file = os.path.join(os.path.dirname(shapefile_path), "fmr__database.csv")
 
     if not os.path.exists(fmr_db_file):
         return jsonify({"status": "error", "message": "FMR database not found"}), 404
@@ -604,7 +650,7 @@ def get_matching_images():
 ## Added 07/28 2:04; for image-available FMR visibility
 @app.route('/get_fmrs_with_images', methods=['GET'])
 def get_fmrs_with_images():
-    fmr_db_file = os.path.join(os.path.dirname(shapefile_path), "fmr_database.csv")
+    fmr_db_file = os.path.join(os.path.dirname(shapefile_path), "fmr__database.csv")
 
     if not os.path.exists(fmr_db_file):
         return jsonify({"status": "error", "message": "FMR database not found"}), 404
@@ -771,6 +817,7 @@ def display_selected_image():
     data = request.get_json()
     fmr_id = data.get("fmr_id")
     image_path = data.get("image_path")
+    image_name = data.get("BSG")
 
     if not os.path.exists(image_path):
         return jsonify({"status": "error", "message": "Image file not found."}), 404
@@ -795,6 +842,7 @@ def display_selected_image():
                 "image_data": preview["base64"],
                 "bounds": preview["bounds"],
                 "fmr_id": fmr_id,
+                "image_name": image_name,
                 "image_path": image_path
             })
         else:
@@ -806,24 +854,6 @@ def display_selected_image():
         traceback.print_exc()
         return jsonify({"status": "error", "message": str(e)}), 500
 
-# @app.route('/get_fmr_metadata', methods=['POST'])
-# def get_fmr_metadata():
-#     data = request.get_json()
-#     fmr_id = data.get("fmr_id")
-
-#     if fmr_id is None or fmr_id not in gdf.index:
-#         return jsonify({"status": "error", "message": "Invalid FMR ID"}), 400
-
-#     row = gdf.loc[fmr_id]
-#     return jsonify({
-#         "status": "success",
-#         "fmr_id": fmr_id,
-#         "name": row.get("name", f"FMR_{fmr_id}"),
-#         "barangay": row.get("BRGY_NAME", "N/A"),
-#         "municipality": row.get("MUN_NAME", "N/A"),
-#         "province": row.get("PROV_NAME", "N/A")
-#     })
-
 def run_flask():
     """Run the Flask app using Waitress."""
     serve(app, host="127.0.0.1", port=5000)
@@ -834,7 +864,7 @@ def create_fmr_map(input_gdf=None):
         print("Shapefile is empty!")
         return ""
 
-    fmr_db_file = os.path.join(os.path.dirname(shapefile_path), "fmr_database.csv")
+    fmr_db_file = os.path.join(os.path.dirname(shapefile_path), "fmr__database.csv")
     fmr_database = None
     if os.path.exists(fmr_db_file):
         try:
@@ -1029,6 +1059,25 @@ def create_fmr_map(input_gdf=None):
                 background-color: #4285f4;
                 color: white;
             }}
+            .draw-fmr-btn {{
+                background-color: #4CAF50;
+                border: none;
+                color: white;
+                padding: 6px 8px;
+                font-size: 14px;
+                border-radius: 4px;
+                cursor: pointer;
+                display: flex;
+                align-items: center;
+                justify-content: center;
+                margin-right: 6px;
+            }}
+            .draw-fmr-btn:hover {{
+                background-color: #45a049;
+            }}
+            .draw-fmr-btn i {{
+                pointer-events: none; /* icon won't capture clicks */
+            }}
         </style>
 
         <!------------ Selection Panel ------------>
@@ -1046,6 +1095,7 @@ def create_fmr_map(input_gdf=None):
             <button onclick="updateFMRs()">Update FMR</button>
             <div id="dynamic-processing-panel" style="margin-top: 20px;"></div>
         </div>
+
         <!-- 08/05: Fixing polyline issue on whole Processing Modal. Added back the backlashes. Escape sequence error? -->
         <!-- Processing Modal -->
         <div id=\"processing-modal\">
@@ -1068,7 +1118,7 @@ def create_fmr_map(input_gdf=None):
                 <div id=\"manual-fmr-section\" style=\"display: none; margin-top: 10px;\">
                     <strong>Draw FMR Centerlines:</strong>
                     <div id=\"manual-fmr-container\" style=\"margin-bottom: 10px;\"></div>
-                    <button type=\"button\" onclick=\"addManualFMRRow()\">+ Draw additional FMR</button>
+                    <button type=\"button\" onclick=\"addManualFMRRow()\">+ Draw FMR</button>
                 </div>
 
                 <div class=\"option-group\">
@@ -1076,6 +1126,7 @@ def create_fmr_map(input_gdf=None):
                     <select id=\"image-type\">
                         <option value=\"BSG\">BSG</option>
                         <option value=\"PNEO\">PNEO</option>
+                        <option value=\"SkySat\">PNEO</option>
                     </select>
                 </div>
 
