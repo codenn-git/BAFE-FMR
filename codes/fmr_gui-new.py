@@ -97,9 +97,6 @@ def process_fmr():
                     "message": f"Invalid geometry in manual FMR: {str(e)}"
                 }), 400
             
-            # For manual workflow, image_path should be handled differently
-            # You might want to determine image_path based on the drawn geometry
-            # For now, using a default or let the processing function handle it
             processing_result = processing(fmr_gdf, image_path, image_type)
             
         elif workflow_type == 'automatic':
@@ -117,12 +114,14 @@ def process_fmr():
                     "message": f"FMR ID {fmr_id} is not selected"
                 }), 400
             
+            # Get FMR name for database lookup
+            fmr_name = str(gdf.loc[fmr_id].get("name", f"FMR_{fmr_id}"))
+            
             # Handle image path validation and recovery
             if not image_path:
                 # Try to recover image path from database if missing
                 if os.path.exists(fmr_db_file):
                     fmr_database = pd.read_csv(fmr_db_file)
-                    fmr_name = str(gdf.loc[fmr_id].get("name", f"FMR_{fmr_id}"))
                     fmr_entry = fmr_database[fmr_database["FMR"] == fmr_name]
                     if not fmr_entry.empty and pd.notna(fmr_entry.iloc[0].get("Image Path")):
                         image_paths = fmr_entry.iloc[0]["Image Path"].split(", ")
@@ -151,17 +150,38 @@ def process_fmr():
 
             processing_result = processing(fmr_gdf, image_path, image_type)
             
-            df = pd.read_csv(fmr_db_file)
-            # processing_result (dict) : call the result and update the fmr_db_file == df
-            processing_result['FMR'] = fmr_id
-            results_df = pd.DataFrame([processing_result])
-            results_df = results_df.set_index('FMR')
-            df = df.set_index('FMR')
-
-            df.update(results_df)
-            df.reset_index(inplace=True)
-            
-            df.to_csv(fmr_db_file)
+            # Update database with results
+            if processing_result.get("status") == "success" and os.path.exists(fmr_db_file):
+                try:
+                    df = pd.read_csv(fmr_db_file)
+                    
+                    # Extract results from the processing result
+                    results = processing_result.get("results", {})
+                    
+                    # Find the row(s) to update based on FMR name and image path
+                    mask = (df["FMR"] == fmr_name) & (df["Image Path"] == image_path)
+                    
+                    if mask.any():
+                        # Update existing rows
+                        for column, value in results.items():
+                            if column in df.columns and value is not None:
+                                df.loc[mask, column] = value
+                    else:
+                        # If no exact match found, update all rows with matching FMR name
+                        mask = df["FMR"] == fmr_name
+                        if mask.any():
+                            for column, value in results.items():
+                                if column in df.columns and value is not None:
+                                    df.loc[mask, column] = value
+                    
+                    # Save the updated database
+                    df.to_csv(fmr_db_file, index=False)
+                    print(f"Database updated for FMR: {fmr_name}")
+                    
+                except Exception as e:
+                    print(f"Error updating database: {str(e)}")
+                    # Don't fail the entire request if database update fails
+                    processing_result["database_update_error"] = str(e)
 
         else:
             return jsonify({
@@ -177,7 +197,7 @@ def process_fmr():
             "status": "error", 
             "message": f"Processing failed: {str(e)}"
         }), 500
-    
+
 ## processing function
 ## this function will be used for the manual processing; since input should be the same,
 ## except: drawn_line (vector_gdf)
@@ -246,28 +266,36 @@ def processing(vector_gdf, raster_path, image_type):
 
         final_line = measure_line(final_binary_raster, final_binary_transform, spacing=3)
 
+        # FIX: Ensure CRS is set before transformation
+        if vector_gdf.crs is None:
+            vector_gdf = vector_gdf.set_crs('EPSG:32651')
+        
+        vector_length = vector_gdf.to_crs("EPSG:32651").length.sum()
+
         if final_line is not None and not final_line.empty:
             final_line_length = final_line.length.values[0]
-            
-            # FIX: Ensure CRS is set before transformation
-            if vector_gdf.crs is None:
-                vector_gdf = vector_gdf.set_crs('EPSG:32651')
-            
-            vector_length = vector_gdf.to_crs("EPSG:32651").length.sum()
             progress = (final_line_length / vector_length) * 100
 
-            results['Current FMR Length'] = float(final_line_length) #"Current FMR Length"
+            if progress > 90:
+                progress_status = "Completed"
+            elif progress == 0:
+                progress_status = "Not Started"
+            else:
+                progress_status = "On-going"
+
+            results['Current FMR Length'] = float(final_line_length)
             results['Planned FMR Length'] = float(vector_length) 
-            results['FMR progress'] = progress # "FMR Progress"
-            results['FMR Status'] = "Completed" if progress > 90 else "On-going" #will need to decide the best threshold value for this
-            results['Mean FMR Width'] = float(transects['width'].mean()) #"Mean Road Width" ## to add this column to the CSV
+            results['FMR Progress'] = float(progress)
+            results['FMR Status'] = progress_status
+            results['Mean FMR Width'] = float(transects['width'].mean()) if not transects.empty else None
 
         else:
+            progress = 0  # when no road is detected
             results['Current FMR Length'] = None
-            results['Planned FMR Length'] = None
+            results['Planned FMR Length'] = float(vector_length)
             results['FMR Progress'] = None
             results['Mean FMR Width'] = None
-            results['FMR Status'] = "Completed" if progress > 90 else "On-going"
+            results['FMR Status'] = "Not Started"  # status when no road detected
             results['message'] = 'No road line detected'
 
         #add export lines here later 
