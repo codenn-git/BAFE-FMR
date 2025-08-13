@@ -115,7 +115,7 @@ def process_fmr():
                 }), 400
             
             # Get FMR name for database lookup
-            fmr_name = str(gdf.loc[fmr_id].get("name", f"FMR_{fmr_id}"))
+            fmr_name = str(gdf.loc[fmr_id].get("name", f"FMR-{fmr_id}"))
             
             # Handle image path validation and recovery
             if not image_path:
@@ -433,7 +433,7 @@ def getDatabase():
     # === Part 2: For each FMR, log all raster matches ===
     results = []
     for idx, row in fmr_gdf.iterrows():
-        fmr_name = str(row.get("name", f"FMR_{idx}"))
+        fmr_name = str(row.get("name", f"FMR-{idx}")) #08/12: dito drei pinalitan ko na to
         fmr_geom = row.geometry
         planned_length = fmr_geom.length
 
@@ -616,7 +616,7 @@ def create_image_preview(image_path, fmr_gdf):
 def get_matching_images():
     data = request.json
     fmr_id = data.get("fmr_id")
-    fmr_name = str(gdf.loc[fmr_id].get("name", f"FMR_{fmr_id}"))
+    fmr_name = str(gdf.loc[fmr_id].get("name", f"FMR-{fmr_id}"))
     fmr_db_file = os.path.join(os.path.dirname(shapefile_path), "fmr_database_aina.csv")
 
     if not os.path.exists(fmr_db_file):
@@ -657,7 +657,7 @@ def get_fmrs_with_images():
     df = df[df["Image Path"].notna() & df["Image Path"].astype(str).str.strip().ne("")]
 
     # Extract numeric index from "FMR" column like "FMR_0"
-    fmr_ids = df["FMR"].str.extract(r"FMR_(\d+)", expand=False).dropna().astype(int).unique().tolist()
+    fmr_ids = df["FMR"].str.extract(r"FMR-(\d+)", expand=False).dropna().astype(int).unique().tolist()
 
     return jsonify({"status": "success", "fmr_ids": fmr_ids})
 
@@ -751,13 +751,13 @@ def export_selected():
         # Determine export base name
         if len(ids) == 1:
             fmr_id = str(selected.iloc[0].get("FMR_ID", ids[0])) if "FMR_ID" in selected.columns else str(ids[0])
-            base_name = f"FMR_{fmr_id}"
+            base_name = f"FMR-{fmr_id}"
         else:
             if "FMR_ID" in selected.columns:
                 id_list = [str(row["FMR_ID"]) for _, row in selected.iterrows()]
             else:
                 id_list = [str(i) for i in ids]
-            base_name = f"multiFMR_{'_'.join(id_list)}"
+            base_name = f"multiFMR-{'_'.join(id_list)}"
 
         export_dir = os.path.dirname(shapefile_path)
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -879,7 +879,7 @@ def create_fmr_map(input_gdf=None):
         brgy = row.get("BRGY_NAME", "N/A")
         mun = row.get("MUN_NAME", "N/A")
         prov = row.get("PROV_NAME", "N/A")
-        fmr_name = str(row.get("name", f"FMR_{idx}"))
+        fmr_name = str(row.get("name", f"FMR-{idx}"))
 
         bsg_info = ""
         if fmr_database is not None:
