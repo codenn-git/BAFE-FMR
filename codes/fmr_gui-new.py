@@ -1,4 +1,4 @@
-# added another style in js_ui
+# please check 8/13
 
 import sys
 import os
@@ -81,25 +81,102 @@ def process_fmr():
         }), 400
 
     try:
+        # 08/13: manually drawn FMR can now be read as a gdf
         if workflow_type == 'manual':
-            # Handle manual workflow
-            if not manual_fmr or not manual_fmr.get('geometry') or not manual_fmr.get('name'):
+            # Expect: manual_fmr = { "selected_fmr_id": <int>, "geometry": <GeoJSON LineString> }
+            mf = data.get("manual_fmr") or {}
+            sel_id = mf.get("selected_fmr_id", None)
+            geom_json = mf.get("geometry", None)
+
+            if sel_id is None or geom_json is None:
                 return jsonify({
                     "status": "error",
-                    "message": "Manual workflow requires manual_fmr with geometry and name"
+                    "message": "Manual workflow requires manual_fmr with selected_fmr_id and geometry"
                 }), 400
-            
-            # Create GeoDataFrame from manual FMR geometry
+
+            # Resolve selected FMR (from master shapefile) and name
             try:
-                geom = shape(manual_fmr['geometry'])
-                fmr_gdf = gpd.GeoDataFrame({'geometry': [geom], 'name': [manual_fmr['name']]}, crs='EPSG:4326')
+                sel_row = gdf.loc[sel_id]
+            except Exception:
+                return jsonify({"status": "error", "message": f"Selected FMR id {sel_id} not found"}), 400
+
+            fmr_name = str(sel_row.get("name", f"FMR_{sel_id}"))
+            fmr_geom_master = sel_row.geometry
+
+            # Build GDF from drawn geometry (EPSG:4326 -> EPSG:32651)
+            try:
+                drawn_geom = shape(geom_json)
+                drawn_gdf = gpd.GeoDataFrame({'geometry': [drawn_geom]}, crs='EPSG:4326').to_crs('EPSG:32651')
             except Exception as e:
-                return jsonify({
-                    "status": "error",
-                    "message": f"Invalid geometry in manual FMR: {str(e)}"
-                }), 400
-            
-            processing_result = processing(fmr_gdf, image_path, image_type)
+                return jsonify({"status": "error", "message": f"Invalid manual geometry: {str(e)}"}), 400
+
+            # Compute lengths (meters) in EPSG:32651
+            try:
+                planned_len_m = gpd.GeoSeries([fmr_geom_master], crs=gdf.crs).to_crs("EPSG:32651").length.iloc[0]
+            except Exception:
+                # fallback if master gdf crs is missing
+                planned_len_m = gpd.GeoSeries([fmr_geom_master], crs="EPSG:32651").length.iloc[0]
+            drawn_len_m = drawn_gdf.length.iloc[0]
+
+            # Derive progress/status like your automatic logic
+            progress = 0.0
+            status = "Not Started"
+            if planned_len_m and planned_len_m > 0:
+                progress = float((drawn_len_m / planned_len_m) * 100.0)
+                if progress > 90:
+                    status = "Completed"
+                elif progress == 0:
+                    status = "Not Started"
+                else:
+                    status = "On-going"
+
+            # Load DB
+            fmr_db_file = os.path.join(os.path.dirname(shapefile_path), "fmr__database.csv")
+            if not os.path.exists(fmr_db_file):
+                return jsonify({"status": "error", "message": "FMR database not found"}), 404
+
+            df = pd.read_csv(fmr_db_file)
+
+            # Find all rows for this FMR name (block)
+            mask = (df["FMR"] == fmr_name)
+            if not mask.any():
+                return jsonify({"status": "error", "message": f"No rows found in database for FMR '{fmr_name}'"}), 404
+
+            original_rows = df.loc[mask].copy()
+
+            # Prepare duplicated rows (one per image row)
+            new_rows = original_rows.copy()
+
+            # Copy date/time/image/planned as-is, override measurement fields
+            # Coerce numeric where needed to avoid string concat issues
+            # Planned FMR Length: keep original values (already present)
+            new_rows["Current FMR Length"] = float(drawn_len_m)
+            new_rows["FMR Progress"] = float(progress)
+            new_rows["FMR Status"] = status
+            # Width unavailable in this manual-only step (no raster), blank out
+            if "Mean FMR Width" in new_rows.columns:
+                new_rows["Mean FMR Width"] = ""
+
+            # Insert right after the last of the original block
+            insert_after = df.index[mask][-1]
+            top = df.iloc[:insert_after + 1]
+            bottom = df.iloc[insert_after + 1:]
+            df_updated = pd.concat([top, new_rows, bottom], ignore_index=True)
+
+            # Persist
+            df_updated.to_csv(fmr_db_file, index=False)
+
+            # Build result payload
+            res = {
+                "FMR": fmr_name,
+                "Planned FMR Length": float(planned_len_m),
+                "Current FMR Length": float(drawn_len_m),
+                "FMR Progress": float(progress),
+                "FMR Status": status,
+                "inserted_rows": int(len(new_rows))
+            }
+
+            return jsonify({"status": "success", "results": res})
             
         elif workflow_type == 'automatic':
             # Handle automatic workflow
@@ -791,7 +868,7 @@ def export_selected():
 
         @after_this_request
         def add_export_message_header(response):
-            # Only add header if not streaming (send_file disables custom headers for streamed files)
+            # Only          header if not streaming (send_file disables custom headers for streamed files)
             try:
                 response.headers.add("X-Export-Message", message)
             except Exception:
@@ -1059,8 +1136,9 @@ def create_fmr_map(input_gdf=None):
                 background-color: #4285f4;
                 color: white;
             }}
-            .draw-fmr-btn {{
-                background-color: #4CAF50;
+             
+            .draw-fmr-btn, .delete-fmr-btn {{
+                background-color: #4CAF50; /* draw = green */
                 border: none;
                 color: white;
                 padding: 6px 8px;
@@ -1070,8 +1148,20 @@ def create_fmr_map(input_gdf=None):
                 display: flex;
                 align-items: center;
                 justify-content: center;
-                margin-right: 6px;
             }}
+            .draw-fmr-btn i, .delete-fmr-btn i {{
+                pointer-events: none;
+            }}
+            .delete-fmr-btn {{
+                background-color: #dc3545; /* delete = red */
+            }}
+            .draw-fmr-btn:hover {{
+                background-color: #45a049;
+            }}
+            .delete-fmr-btn:hover {{
+                background-color: #a71d2a;
+            }}
+            /* ========== 8/13: End of changes ========== */
             .draw-fmr-btn:hover {{
                 background-color: #45a049;
             }}
@@ -1113,12 +1203,12 @@ def create_fmr_map(input_gdf=None):
                     <label><input type=\"radio\" name=\"workflow-type\" value=\"manual\" onchange=\"toggleManualSection()\"> Manual</label>
                     <label><input type=\"radio\" name=\"workflow-type\" value=\"automatic\" onchange=\"toggleManualSection()\" checked> Automatic</label>
                 </div>
-
+                <!-- 08/13 manual processing designing -->
                 <!-- Manual Drawing UI -->
-                <div id=\"manual-fmr-section\" style=\"display: none; margin-top: 10px;\">
+                <div id="manual-fmr-section" style="display: none; margin-top: 10px;">
                     <strong>Draw FMR Centerlines:</strong>
-                    <div id=\"manual-fmr-container\" style=\"margin-bottom: 10px;\"></div>
-                    <button type=\"button\" onclick=\"addManualFMRRow()\">+ Draw FMR</button>
+                    <div id="manual-fmr-container" style="margin-bottom: 10px;"></div>
+                    <button type="button" onclick="addManualFMRRow()">+ Add FMR</button>
                 </div>
 
                 <div class=\"option-group\">
