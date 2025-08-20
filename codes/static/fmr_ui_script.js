@@ -1,3 +1,4 @@
+// PLease check 8/13
 // JavaScript logic for FMR GUI
 // Fixed: Multiple BSG images can now be displayed simultaneously
 // Optimized: Collapsible FMRs, scrollable panel, expand/collapse all, and lazy loading
@@ -8,6 +9,9 @@ let currentMatchingImages = {};
 const style = document.createElement('style');
 const imageCache = {};  // key: image path, value: { base64, bounds }
 const overlayLayers = {};  // key: image path, value: leaflet layer
+
+let manualFMRs = [];          // { id, selectedFmrId, geometry, layer }
+let manualFMRCounter = 0;
 
 function overlayImage({ image_base64, image_bounds }, imagePath) {
     if (!window._map) {
@@ -384,147 +388,85 @@ function hideProcessingModal() {
     if (modal) modal.style.display = 'none';
 }
 
-// 07/31: consolidated automatic and manual processing into one processing function
+// 08/13: also had modifications here
 function runProcessing() {
-    const processType = document.querySelector('input[name="process-type"]:checked').value;
-    const workflowType = document.querySelector('input[name="workflow-type"]:checked').value;
-    const imageType = document.getElementById('image-type').value;
-    
-    if (workflowType === "manual") {
-        // Validate manual FMRs
-        const valid = manualFMRs.every(f => f.geometry && f.name);
-        if (!valid) {
-            alert("Please complete all drawn FMRs and name them.");
-            return;
-        }
-        // 08/06
-         // Get selected images based on process type
-        const imagesToProcess = [];
-        
-        if (processType === 'selected') {
-            // Find all checked image checkboxes
-            document.querySelectorAll('.image-checkbox:checked').forEach(checkbox => {
-                imagesToProcess.push({
-                    fmr_id: parseInt(checkbox.dataset.fmrId),
-                    image_path: checkbox.dataset.imagePath
-                });
-            });
-            
-            if (imagesToProcess.length === 0) {
-                alert('Please select at least one image to process');
-                return;
-            }
-        } else {
-            // Process all images for selected FMRs
-            fmrIds.forEach(fmrId => {
-                const images = currentMatchingImages[fmrId] || [];
-                images.forEach(img => {
-                    imagesToProcess.push({
-                        fmr_id: fmrId,
-                        image_path: img.path
-                    });
-                });
-            });
-        }
-        
-        if (imagesToProcess.length === 0) {
-            alert('No images found to process');
-            return;
-        }
+  const workflowType = document.querySelector('input[name="workflow-type"]:checked').value;
+  const imageType = document.getElementById('image-type').value; // still passed to keep API stable
+  const processType = document.querySelector('input[name="process-type"]:checked').value; // unused in manual here
 
-        // Process each manual FMR
-        manualFMRs.forEach(manualFMR => {
-            processFMR(manualFMR.id, null /* 08/06: need to access the image_path here for processing */, workflowType, imageType, manualFMR);
-        });
-
-    } else if (workflowType === "automatic") {
-        // Get selected FMR IDs
-        const fmrIds = Array.from(selectedIds);
-        
-        // Get selected images based on process type
-        const imagesToProcess = [];
-        
-        if (processType === 'selected') {
-            // Find all checked image checkboxes
-            document.querySelectorAll('.image-checkbox:checked').forEach(checkbox => {
-                imagesToProcess.push({
-                    fmr_id: parseInt(checkbox.dataset.fmrId),
-                    image_path: checkbox.dataset.imagePath
-                });
-            });
-            
-            if (imagesToProcess.length === 0) {
-                alert('Please select at least one image to process');
-                return;
-            }
-        } else {
-            // Process all images for selected FMRs
-            fmrIds.forEach(fmrId => {
-                const images = currentMatchingImages[fmrId] || [];
-                images.forEach(img => {
-                    imagesToProcess.push({
-                        fmr_id: fmrId,
-                        image_path: img.path
-                    });
-                });
-            });
-        }
-        
-        if (imagesToProcess.length === 0) {
-            alert('No images found to process');
-            return;
-        }
-        
-        // Process each image
-        imagesToProcess.forEach(item => {
-            processFMR(item.fmr_id, item.image_path, workflowType, imageType);
-        });
+  // MANUAL PROCESSING
+  if (workflowType === 'manual') {
+    // validate rows
+    const valid = manualFMRs.every(m => m.geometry && Number.isInteger(m.selectedFmrId));
+    if (!valid) {
+      alert('Please pick an FMR for each row and finish drawing the line.');
+      return;
     }
-    
-    hideProcessingModal();
+    // send one request per manual row
+    manualFMRs.forEach(m => {
+      processFMR(null, null, 'manual', imageType, {
+        selectedFmrId: m.selectedFmrId,
+        geometry: m.geometry
+      });
+    });
+    return;
+  }
+
+  
+  const fmrIds = Array.from(selectedIds);
+  const imagesToProcess = [];
+  if (processType === 'selected') {
+    document.querySelectorAll('.image-checkbox:checked').forEach(cb => {
+      imagesToProcess.push({ fmr_id: parseInt(cb.dataset.fmrId), image_path: cb.dataset.imagePath });
+    });
+    if (imagesToProcess.length === 0) {
+      alert('Please select at least one image to process');
+      return;
+    }
+  } else {
+    fmrIds.forEach(fid => {
+      const imgs = currentMatchingImages[fid] || [];
+      imgs.forEach(img => imagesToProcess.push({ fmr_id: fid, image_path: img.path }));
+    });
+  }
+  if (imagesToProcess.length === 0) {
+    alert('No images found to process');
+    return;
+  }
+  imagesToProcess.forEach(item => processFMR(item.fmr_id, item.image_path, 'automatic', imageType));
 }
 
+// 8:13: Function to process FMRs
 function processFMR(fmr_id, image_path, workflow_type, image_type, manualFMR = null) {
-    const requestBody = {
-        workflow_type: workflow_type,
-        image_type: image_type
-    };
-
-    if (workflow_type === 'manual' && manualFMR) {
-        // For manual workflow, send manual FMR data
-        requestBody.fmr_id = manualFMR.id;
-        requestBody.manual_fmr = {
-            name: manualFMR.name,
-            geometry: manualFMR.geometry
+  const body = { workflow_type, image_type };
+  if (workflow_type === 'manual' && manualFMR) {
+        body.manual_fmr = {
+        selected_fmr_id: manualFMR.selectedFmrId,
+        geometry: manualFMR.geometry
         };
-        // image_path is null for manual FMRs
     } else {
-        // For automatic workflow, send FMR ID and image path
-        requestBody.fmr_id = fmr_id;
-        requestBody.image_path = image_path;
-    }
+        body.fmr_id = fmr_id;
+        body.image_path = image_path;
+  }
 
-    fetch('/process_fmr', {
+  fetch('/process_fmr', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(requestBody)
+        body: JSON.stringify(body)
     })
-    .then(response => response.json())
+    .then(r => r.json())
     .then(data => {
         if (data.status === 'error') {
-            console.error('Processing error:', data.message);
-            const identifier = workflow_type === 'manual' ? manualFMR.name : `FMR-${fmr_id}`;
-            alert(`Error processing ${identifier}: ${data.message}`);
+        console.error('Processing error:', data.message);
+        alert(`Error: ${data.message}`);
         } else {
-            console.log('Processing results:', data);
-            const identifier = workflow_type === 'manual' ? manualFMR.name : `FMR-${fmr_id}`;
-            alert(`Processing completed for ${identifier}`);
+        console.log('Processing results:', data);
+        alert('Manual processing complete.');
         }
     })
-    .catch(error => {
-        console.error('Error:', error);
-        const identifier = workflow_type === 'manual' ? manualFMR.name : `FMR-${fmr_id}`;
-        alert(`Error processing ${identifier}: ${error.message}`);
+    .catch(err => {
+        console.error(err);
+        alert(`Error: ${err.message}`);
     });
 }
 
@@ -580,48 +522,49 @@ function toggleImageVisibility(button) {
         console.log("Restored all FMRs.");
     }
 }
-
-
-let manualFMRs = []; // [{ id, geometry: GeoJSON, name }]
-let manualFMRCounter = 0;
-
+ // 8/13: modified manual FMR drawing logic
 function addManualFMRRow() {
-    const container = document.getElementById('manual-fmr-container');
     const index = manualFMRCounter++;
 
     const row = document.createElement('div');
     row.classList.add('manual-fmr-row');
-    row.id = `manual-fmr-${index}`;
     row.style.display = 'flex';
     row.style.alignItems = 'center';
-    row.style.gap = '10px';
+    row.style.gap = '8px';
     row.style.marginBottom = '10px';
 
+    // Draw button - pencil icon only
     const drawBtn = document.createElement('button');
-    drawBtn.textContent = '🖊️ Draw FMR';
-    drawBtn.onclick = () => drawManualLine(index);
-
-    const input = document.createElement('input');
-    input.type = 'text';
-    input.placeholder = 'Enter FMR name';
-    input.oninput = (e) => {
-        const fmr = manualFMRs.find(f => f.id === index);
-        if (fmr) fmr.name = e.target.value;
+    drawBtn.classList.add('draw-fmr-btn');
+    drawBtn.innerHTML = '<i class="fas fa-pencil-alt"></i>';
+    drawBtn.title = 'Draw FMR';
+    drawBtn.onclick = () => {
+        const fmrId = parseInt(select.value);
+        drawManualLine(index, fmrId);
     };
 
+    // Dropdown of selected FMRs
+    const select = document.createElement('select');
+    selectedIds.forEach(id => {
+        const opt = document.createElement('option');
+        opt.value = id;
+        opt.textContent = `FMR-${id}`;
+        select.appendChild(opt);
+    });
+
+    // Delete button - X icon only
     const deleteBtn = document.createElement('button');
-    deleteBtn.textContent = '❌';
+    deleteBtn.classList.add('delete-fmr-btn');
+    deleteBtn.innerHTML = '<i class="fas fa-times"></i>';
+    deleteBtn.title = 'Remove row';
     deleteBtn.onclick = () => removeManualFMRRow(index);
 
     row.appendChild(drawBtn);
-    row.appendChild(input);
+    row.appendChild(select);
     row.appendChild(deleteBtn);
-    container.appendChild(row);
+    document.getElementById('manual-fmr-container').appendChild(row);
 
-    manualFMRs.push({ id: index, name: '', geometry: null });
-
-    // Optional: grow modal dynamically
-    document.getElementById('processing-modal').style.height = 'auto';
+    manualFMRs.push({ id: index, selectedFmrId: null, geometry: null });
 }
 
 function removeManualFMRRow(index) {
@@ -629,31 +572,55 @@ function removeManualFMRRow(index) {
     manualFMRs = manualFMRs.filter(f => f.id !== index);
 }
 
-function drawManualLine(index) {
-    if (!window._map) return;
+// 8/13: Changes
+function drawManualLine(index, selectedFmrId) {
+    manualFMRs[index].selectedFmrId = selectedFmrId;
 
-    toggleDrawingUI(true); // Hide everything except map // only hides the UI, will need to hide the selected FMR as well
+    // Hide UI, keep map only
+    toggleDrawingUI(true);
 
+    // 🔹 Hide all FMR lines while drawing
+    Object.values(geoLayers).forEach(layer => {
+        window._map.removeLayer(layer);
+    });
+
+    // Initialize draw control if not yet done
     if (!window._drawControl) {
         window._drawControl = new L.Control.Draw({
-            draw: { polygon: false, marker: false, circle: false, rectangle: false, circlemarker: false, polyline: true },
+            draw: {
+                polygon: false,
+                marker: false,
+                circle: false,
+                rectangle: false,
+                circlemarker: false,
+                polyline: { shapeOptions: { color: '#222', weight: 4, opacity: 1.0 } }
+            },
             edit: false
         });
         window._map.addControl(window._drawControl);
     }
 
-    const drawHandler = new L.Draw.Polyline(window._map);
+    // Create polyline draw handler with custom style
+    const drawHandler = new L.Draw.Polyline(window._map, {
+        shapeOptions: { color: '#222', weight: 4, opacity: 1.0 }
+    });
     drawHandler.enable();
 
+    // When drawing is finished
     window._map.once(L.Draw.Event.CREATED, function (e) {
         const layer = e.layer;
         const geojson = layer.toGeoJSON();
-        const fmr = manualFMRs.find(f => f.id === index);
-        if (fmr) fmr.geometry = geojson.geometry;
+        manualFMRs[index].geometry = geojson.geometry;
 
+        // Add the drawn line to the map
         layer.addTo(window._map);
 
-        // 🔙 Show UI back
+        // 🔹 Restore all FMR lines
+        Object.values(geoLayers).forEach(layer => {
+            window._map.addLayer(layer);
+        });
+
+        // Show UI back
         toggleDrawingUI(false);
     });
 }

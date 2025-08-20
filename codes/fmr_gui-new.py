@@ -34,8 +34,8 @@ import matplotlib
 matplotlib.use("Agg")
 # ==========================================================
 # Paths
-shapefile_path = r"C:\Users\user-307E123400\OneDrive - Philippine Space Agency\SDMAD_SHARED\PROJECTS\SAKA\FMR\GUI\Master FMR\NE_master_fmr.shp"
-bsg_folder = r"C:\Users\user-307E123400\OneDrive - Philippine Space Agency\SDMAD_SHARED\PROJECTS\SAKA\FMR\GUI\Raster images"
+shapefile_path = r"C:\Users\user-307E4B3400\OneDrive - Philippine Space Agency\SDMAD_SHARED\PROJECTS\SAKA\FMR\GUI\Master FMR\NE_master_fmr.shp"
+bsg_folder = r"C:\Users\user-307E4B3400\OneDrive - Philippine Space Agency\SDMAD_SHARED\PROJECTS\SAKA\FMR\GUI\Raster images"
 
 # ==========================================================
 # Flask Setup
@@ -63,7 +63,7 @@ def process_fmr():
     image_path = data.get("image_path")
     manual_fmr = data.get("manual_fmr")  # For manual workflow
     
-    fmr_db_file = os.path.join(os.path.dirname(shapefile_path), "fmr__database.csv")
+    fmr_db_file = os.path.join(os.path.dirname(shapefile_path), "fmr_database_aina.csv")
 
     global selected_features, gdf
 
@@ -116,9 +116,9 @@ def process_fmr():
             except Exception:
                 # fallback if master gdf crs is missing
                 planned_len_m = gpd.GeoSeries([fmr_geom_master], crs="EPSG:32651").length.iloc[0]
+
             drawn_len_m = drawn_gdf.length.iloc[0]
 
-            # Derive progress/status like your automatic logic
             progress = 0.0
             status = "Not Started"
             if planned_len_m and planned_len_m > 0:
@@ -131,7 +131,7 @@ def process_fmr():
                     status = "On-going"
 
             # Load DB
-            fmr_db_file = os.path.join(os.path.dirname(shapefile_path), "fmr__database.csv")
+            fmr_db_file = os.path.join(os.path.dirname(shapefile_path), "fmr_database_aina.csv")
             if not os.path.exists(fmr_db_file):
                 return jsonify({"status": "error", "message": "FMR database not found"}), 404
 
@@ -471,7 +471,7 @@ def getDatabase():
 
     master_fmr = shapefile_path
     bsg_folder_path = bsg_folder
-    fmr_db_file = os.path.join(os.path.dirname(master_fmr), "fmr__database.csv")
+    fmr_db_file = os.path.join(os.path.dirname(master_fmr), "fmr_database_aina.csv")
 
     # Load FMRs in EPSG:32651
     fmr_gdf = gpd.read_file(master_fmr).to_crs("EPSG:32651")
@@ -696,7 +696,7 @@ def get_matching_images():
     data = request.json
     fmr_id = data.get("fmr_id")
     fmr_name = str(gdf.loc[fmr_id].get("name", f"FMR-{fmr_id}"))
-    fmr_db_file = os.path.join(os.path.dirname(shapefile_path), "fmr__database.csv")
+    fmr_db_file = os.path.join(os.path.dirname(shapefile_path), "fmr_database_aina.csv")
 
     if not os.path.exists(fmr_db_file):
         return jsonify({"status": "error", "message": "FMR database not found"}), 404
@@ -727,7 +727,7 @@ def get_matching_images():
 ## Added 07/28 2:04; for image-available FMR visibility
 @app.route('/get_fmrs_with_images', methods=['GET'])
 def get_fmrs_with_images():
-    fmr_db_file = os.path.join(os.path.dirname(shapefile_path), "fmr__database.csv")
+    fmr_db_file = os.path.join(os.path.dirname(shapefile_path), "fmr_database_aina.csv")
 
     if not os.path.exists(fmr_db_file):
         return jsonify({"status": "error", "message": "FMR database not found"}), 404
@@ -742,7 +742,7 @@ def get_fmrs_with_images():
 
 @app.route('/')
 def serve_map():
-    return send_file(r"C:\Users\user-307E123400\Desktop\BAFE FMR\fmr_interactive_map.html")  # Path changed aina
+    return send_file(r"C:\Users\user-307E4B3400\Desktop\BAFE FMR\fmr_interactive_map.html")  # Path changed aina
 
 
 @app.route('/select', methods=['POST'])
@@ -941,7 +941,7 @@ def create_fmr_map(input_gdf=None):
         print("Shapefile is empty!")
         return ""
 
-    fmr_db_file = os.path.join(os.path.dirname(shapefile_path), "fmr__database.csv")
+    fmr_db_file = os.path.join(os.path.dirname(shapefile_path), "fmr_database_aina.csv")
     fmr_database = None
     if os.path.exists(fmr_db_file):
         try:
@@ -1256,7 +1256,7 @@ def create_fmr_map(input_gdf=None):
         </script>
     """))
 
-    html_path = "C:/Users/user-307E123400/Desktop/BAFE FMR/fmr_interactive_map.html"
+    html_path = "C:/Users/user-307E4B3400/Desktop/BAFE FMR/fmr_interactive_map.html"
     fmap.save(html_path)
     print("Interactive FMR map created: fmr_interactive_map.html")
     return os.path.abspath(html_path)
