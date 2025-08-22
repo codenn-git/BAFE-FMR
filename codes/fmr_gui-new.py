@@ -833,6 +833,11 @@ def create_fmr_map(input_gdf=None):
         bsg_info = ""
         if fmr_database is not None:
             fmr_entries = fmr_database[(fmr_database["FMR"] == fmr_name) & (fmr_database["BSG"].notna()) & (fmr_database["BSG"] != "")]
+
+            # 08/22: Should filter out "manual" Processing types to avoid displaying duplicate image names in GUI
+            if "Processing Type" in fmr_database.columns:
+                fmr_entries = fmr_entries[~fmr_entries["Processing Type"].str.lower().eq("manual")]
+            
             if not fmr_entries.empty:
                 bsg_info = "<b>Available BSG Images:</b><br>"
                 for _, db_row in fmr_entries.iterrows():
