@@ -53,6 +53,8 @@ filtered_gdf = gdf.copy()
 # not yet finished, care of aina
 
 # 07/31: edited for consistency with changes in runProcessing and processFMR
+# Fixed version of the process_fmr function with better database update logic
+
 @app.route('/process_fmr', methods=['POST'])
 def process_fmr():
     """Process the selected FMR with the chosen workflow"""
@@ -81,6 +83,8 @@ def process_fmr():
         }), 400
 
     try:
+        fmr_name = None  # Initialize fmr_name
+        
         if workflow_type == 'manual':
             # Handle manual workflow
             if not manual_fmr or not manual_fmr.get('geometry') or not manual_fmr.get('name'):
@@ -93,6 +97,7 @@ def process_fmr():
             try:
                 geom = shape(manual_fmr['geometry'])
                 fmr_gdf = gpd.GeoDataFrame({'geometry': [geom], 'name': [manual_fmr['name']]}, crs='EPSG:4326')
+                fmr_name = manual_fmr['name']  # Use the manual FMR name
             except Exception as e:
                 return jsonify({
                     "status": "error",
@@ -100,9 +105,6 @@ def process_fmr():
                 }), 400
             
             processing_result = processing(fmr_gdf, image_path, image_type)
-            
-            # For manual workflow, we might need to add to database or handle differently
-            # This part depends on how you want to handle manual FMR database entries
             
         elif workflow_type == 'automatic':
             # Handle automatic workflow
@@ -119,8 +121,15 @@ def process_fmr():
                     "message": f"FMR ID {fmr_id} is not selected"
                 }), 400
             
-            # Get FMR name for database lookup
-            fmr_name = str(gdf.loc[fmr_id].get("name", f"FMR_{fmr_id}"))
+            # Get FMR name for database lookup - FIXED: Better name extraction
+            fmr_row = gdf.loc[fmr_id]
+            if "name" in fmr_row and pd.notna(fmr_row["name"]):
+                fmr_name = str(fmr_row["name"])
+            else:
+                # Fallback to creating name from index
+                fmr_name = f"FMR-{fmr_id}"
+            
+            print(f"Processing FMR with name: {fmr_name}")  # Debug print
             
             # Handle image path validation and recovery
             if not image_path:
@@ -154,61 +163,92 @@ def process_fmr():
                 fmr_gdf = fmr_gdf.set_crs('EPSG:4326')
 
             processing_result = processing(fmr_gdf, image_path, image_type)
-            
-            # Update database with processing results
-            if processing_result.get("status") == "success" and os.path.exists(fmr_db_file):
-                try:
-                    df = pd.read_csv(fmr_db_file)
-                    
-                    # Add Processing Type column if it doesn't exist
-                    if "Processing Type" not in df.columns:
-                        df["Processing Type"] = ""
-                    
-                    # Extract results from the processing result
-                    results = processing_result.get("results", {})
-                    
-                    # Set processing type based on workflow
-                    processing_type = "Manual" if workflow_type == 'manual' else "Planned"
-                    
-                    # Find the row(s) to update based on FMR name and image path
-                    mask = (df["FMR"] == fmr_name) & (df["Image Path"] == image_path)
-                    
-                    if mask.any():
-                        # Update existing rows
-                        for column, value in results.items():
-                            if column in df.columns and value is not None:
-                                df.loc[mask, column] = value
-                        # Set processing type
-                        df.loc[mask, "Processing Type"] = processing_type
-                    else:
-                        # If no exact match found, update all rows with matching FMR name
-                        mask = df["FMR"] == fmr_name
-                        if mask.any():
-                            for column, value in results.items():
-                                if column in df.columns and value is not None:
-                                    df.loc[mask, column] = value
-                            # Set processing type
-                            df.loc[mask, "Processing Type"] = processing_type
-                    
-                    # Save the updated database
-                    df.to_csv(fmr_db_file, index=False)
-                    print(f"Database updated for FMR: {fmr_name} (Processing Type: {processing_type})")
-                    
-                except Exception as e:
-                    print(f"Error updating database: {str(e)}")
-                    # Don't fail the entire request if database update fails
-                    processing_result["database_update_error"] = str(e)
-
+        
         else:
             return jsonify({
                 "status": "error", 
                 "message": "Invalid workflow type. Must be 'manual' or 'automatic'"
             }), 400
+            
+        # FIXED: Better database update logic
+        if processing_result.get("status") == "success" and os.path.exists(fmr_db_file):
+            try:
+                df = pd.read_csv(fmr_db_file)
+                print(f"Loaded database with {len(df)} rows")  # Debug print
+                
+                # Add Processing Type column if it doesn't exist
+                if "Processing Type" not in df.columns:
+                    df["Processing Type"] = ""
+                
+                # Extract results from the processing result
+                results = processing_result.get("results", {})
+                print(f"Processing results: {results}")  # Debug print
+                
+                # Set processing type based on workflow
+                processing_type = "Manual" if workflow_type == 'manual' else "Planned"
+                
+                # FIXED: Better matching logic
+                print(f"Looking for FMR name: '{fmr_name}' and image path: '{image_path}'")
+                
+                # First try exact match with both FMR name and image path
+                if image_path:
+                    mask = (df["FMR"] == fmr_name) & (df["Image Path"] == image_path)
+                    print(f"Exact match found: {mask.sum()} rows")
+                else:
+                    mask = pd.Series([False] * len(df))
+                
+                # If no exact match, try matching just FMR name
+                if not mask.any():
+                    mask = df["FMR"] == fmr_name
+                    print(f"FMR name match found: {mask.sum()} rows")
+                
+                # If still no match, try matching with different FMR name formats
+                if not mask.any():
+                    # Try matching with "FMR_{id}" format
+                    alt_fmr_name = f"FMR_{fmr_id}" if workflow_type == 'automatic' else fmr_name
+                    mask = df["FMR"] == alt_fmr_name
+                    print(f"Alternative FMR name '{alt_fmr_name}' match found: {mask.sum()} rows")
+                
+                if mask.any():
+                    # Update existing rows
+                    print(f"Updating {mask.sum()} database rows...")
+                    for column, value in results.items():
+                        if column in df.columns and value is not None:
+                            df.loc[mask, column] = value
+                            print(f"Updated column '{column}' with value: {value}")
+                    
+                    # Set processing type
+                    df.loc[mask, "Processing Type"] = processing_type
+                    print(f"Set Processing Type to: {processing_type}")
+                    
+                    # Save the updated database
+                    df.to_csv(fmr_db_file, index=False)
+                    print(f"Database updated successfully for FMR: {fmr_name} (Processing Type: {processing_type})")
+                    
+                    # Add success message to processing result
+                    processing_result["database_updated"] = True
+                    processing_result["updated_rows"] = int(mask.sum())
+                    
+                else:
+                    print(f"No matching rows found in database for FMR: {fmr_name}")
+                    print("Available FMR names in database:")
+                    print(df["FMR"].unique()[:10])  # Print first 10 FMR names for debugging
+                    processing_result["database_update_warning"] = f"No matching rows found for FMR: {fmr_name}"
+                
+            except Exception as e:
+                print(f"Error updating database: {str(e)}")
+                import traceback
+                traceback.print_exc()
+                # Don't fail the entire request if database update fails
+                processing_result["database_update_error"] = str(e)
         
         # Return the processing result
         return jsonify(processing_result)
         
     except Exception as e:
+        print(f"Error in process_fmr: {str(e)}")
+        import traceback
+        traceback.print_exc()
         return jsonify({
             "status": "error", 
             "message": f"Processing failed: {str(e)}"
@@ -1086,12 +1126,12 @@ def create_fmr_map(input_gdf=None):
                     <select id=\"image-type\">
                         <option value=\"BSG\">BSG</option>
                         <option value=\"PNEO\">PNEO</option>
-                        <option value=\"SkySat\">PNEO</option>
+                        <option value=\"SkySat\">SkySat</option>
                     </select>
                 </div>
 
                 <div class=\"modal-buttons\">
-                    <button id=\"cancel-processing\" onclick=\"hideProcessingModal()\">Cancel</button>
+                    <button id=\"cancel-processing\" onclick=\"hideProcessingModal()\">Close</button>
                     <button id=\"run-processing\" onclick=\"runProcessing()\">Run</button>
                 </div>
             </div>
@@ -1195,6 +1235,30 @@ class FMRMainWindow(QMainWindow):
         print("Closing FMR GUI application...")
         event.accept()
 
+def migrate_database_add_processing_type():
+    """Add Processing Type column to existing database if it doesn't exist"""
+    fmr_db_file = os.path.join(os.path.dirname(shapefile_path), "fmr_database_aina.csv")
+    
+    if not os.path.exists(fmr_db_file):
+        print("Database file does not exist, no migration needed.")
+        return
+    
+    try:
+        df = pd.read_csv(fmr_db_file)
+        
+        # Check if Processing Type column already exists
+        if "Processing Type" not in df.columns:
+            # Add the column with empty values
+            df["Processing Type"] = ""
+            
+            # Save the updated database
+            df.to_csv(fmr_db_file, index=False)
+            print("Successfully added 'Processing Type' column to existing database")
+        else:
+            print("'Processing Type' column already exists in database")
+            
+    except Exception as e:
+        print(f"Error during database migration: {str(e)}")
 
 def main():
     """Main function to run the FMR GUI application."""
