@@ -836,7 +836,7 @@ def create_fmr_map(input_gdf=None):
 
             # 08/22: Should filter out "manual" Processing types to avoid displaying duplicate image names in GUI
             if "Processing Type" in fmr_database.columns:
-                fmr_entries = fmr_entries[~fmr_entries["Processing Type"].str.lower().eq("manual")]
+                fmr_entries = fmr_entries[~fmr_entries["Processing Type"].astype(str).str.lower().eq("manual")]
             
             if not fmr_entries.empty:
                 bsg_info = "<b>Available BSG Images:</b><br>"
