@@ -461,7 +461,7 @@ function processFMR(fmr_id, image_path, workflow_type, image_type, manualFMR = n
         alert(`Error: ${data.message}`);
         } else {
         console.log('Processing results:', data);
-        alert('Manual processing complete.');
+        alert('Processing complete.');
         }
     })
     .catch(err => {

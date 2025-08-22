@@ -81,102 +81,28 @@ def process_fmr():
         }), 400
 
     try:
-        # 08/13: manually drawn FMR can now be read as a gdf
         if workflow_type == 'manual':
-            # Expect: manual_fmr = { "selected_fmr_id": <int>, "geometry": <GeoJSON LineString> }
-            mf = data.get("manual_fmr") or {}
-            sel_id = mf.get("selected_fmr_id", None)
-            geom_json = mf.get("geometry", None)
-
-            if sel_id is None or geom_json is None:
+            # Handle manual workflow
+            if not manual_fmr or not manual_fmr.get('geometry') or not manual_fmr.get('name'):
                 return jsonify({
                     "status": "error",
-                    "message": "Manual workflow requires manual_fmr with selected_fmr_id and geometry"
+                    "message": "Manual workflow requires manual_fmr with geometry and name"
                 }), 400
-
-            # Resolve selected FMR (from master shapefile) and name
+            
+            # Create GeoDataFrame from manual FMR geometry
             try:
-                sel_row = gdf.loc[sel_id]
-            except Exception:
-                return jsonify({"status": "error", "message": f"Selected FMR id {sel_id} not found"}), 400
-
-            fmr_name = str(sel_row.get("name", f"FMR-{sel_id}"))
-            fmr_geom_master = sel_row.geometry
-
-            # Build GDF from drawn geometry (EPSG:4326 -> EPSG:32651)
-            try:
-                drawn_geom = shape(geom_json)
-                drawn_gdf = gpd.GeoDataFrame({'geometry': [drawn_geom]}, crs='EPSG:4326').to_crs('EPSG:32651')
+                geom = shape(manual_fmr['geometry'])
+                fmr_gdf = gpd.GeoDataFrame({'geometry': [geom], 'name': [manual_fmr['name']]}, crs='EPSG:4326')
             except Exception as e:
-                return jsonify({"status": "error", "message": f"Invalid manual geometry: {str(e)}"}), 400
-
-            # Compute lengths (meters) in EPSG:32651
-            try:
-                planned_len_m = gpd.GeoSeries([fmr_geom_master], crs=gdf.crs).to_crs("EPSG:32651").length.iloc[0]
-            except Exception:
-                # fallback if master gdf crs is missing
-                planned_len_m = gpd.GeoSeries([fmr_geom_master], crs="EPSG:32651").length.iloc[0]
-
-            drawn_len_m = drawn_gdf.length.iloc[0]
-
-            progress = 0.0
-            status = "Not Started"
-            if planned_len_m and planned_len_m > 0:
-                progress = float((drawn_len_m / planned_len_m) * 100.0)
-                if progress > 90:
-                    status = "Completed"
-                elif progress == 0:
-                    status = "Not Started"
-                else:
-                    status = "On-going"
-
-            # Load DB
-            fmr_db_file = os.path.join(os.path.dirname(shapefile_path), "fmr_database_aina.csv")
-            if not os.path.exists(fmr_db_file):
-                return jsonify({"status": "error", "message": "FMR database not found"}), 404
-
-            df = pd.read_csv(fmr_db_file)
-
-            # Find all rows for this FMR name (block)
-            mask = (df["FMR"] == fmr_name)
-            if not mask.any():
-                return jsonify({"status": "error", "message": f"No rows found in database for FMR '{fmr_name}'"}), 404
-
-            original_rows = df.loc[mask].copy()
-
-            # Prepare duplicated rows (one per image row)
-            new_rows = original_rows.copy()
-
-            # Copy date/time/image/planned as-is, override measurement fields
-            # Coerce numeric where needed to avoid string concat issues
-            # Planned FMR Length: keep original values (already present)
-            new_rows["Current FMR Length"] = float(drawn_len_m)
-            new_rows["FMR Progress"] = float(progress)
-            new_rows["FMR Status"] = status
-            # Width unavailable in this manual-only step (no raster), blank out
-            if "Mean FMR Width" in new_rows.columns:
-                new_rows["Mean FMR Width"] = ""
-
-            # Insert right after the last of the original block
-            insert_after = df.index[mask][-1]
-            top = df.iloc[:insert_after + 1]
-            bottom = df.iloc[insert_after + 1:]
-            df_updated = pd.concat([top, new_rows, bottom], ignore_index=True)
-
-            # Persist
-            df_updated.to_csv(fmr_db_file, index=False)
-
-            # Build result payload
-            res = {
-                "FMR": fmr_name,
-                "Planned FMR Length": float(planned_len_m),
-                "Current FMR Length": float(drawn_len_m),
-                "FMR Progress": float(progress),
-                "FMR Status": status,
-                "inserted_rows": int(len(new_rows))
-            }
-
-            return jsonify({"status": "success", "results": res})
+                return jsonify({
+                    "status": "error",
+                    "message": f"Invalid geometry in manual FMR: {str(e)}"
+                }), 400
+            
+            processing_result = processing(fmr_gdf, image_path, image_type)
+            
+            # For manual workflow, we might need to add to database or handle differently
+            # This part depends on how you want to handle manual FMR database entries
             
         elif workflow_type == 'automatic':
             # Handle automatic workflow
@@ -194,7 +120,7 @@ def process_fmr():
                 }), 400
             
             # Get FMR name for database lookup
-            fmr_name = str(gdf.loc[fmr_id].get("name", f"FMR-{fmr_id}"))
+            fmr_name = str(gdf.loc[fmr_id].get("name", f"FMR_{fmr_id}"))
             
             # Handle image path validation and recovery
             if not image_path:
@@ -229,13 +155,20 @@ def process_fmr():
 
             processing_result = processing(fmr_gdf, image_path, image_type)
             
-            # Update database with results
+            # Update database with processing results
             if processing_result.get("status") == "success" and os.path.exists(fmr_db_file):
                 try:
                     df = pd.read_csv(fmr_db_file)
                     
+                    # Add Processing Type column if it doesn't exist
+                    if "Processing Type" not in df.columns:
+                        df["Processing Type"] = ""
+                    
                     # Extract results from the processing result
                     results = processing_result.get("results", {})
+                    
+                    # Set processing type based on workflow
+                    processing_type = "Manual" if workflow_type == 'manual' else "Planned"
                     
                     # Find the row(s) to update based on FMR name and image path
                     mask = (df["FMR"] == fmr_name) & (df["Image Path"] == image_path)
@@ -245,6 +178,8 @@ def process_fmr():
                         for column, value in results.items():
                             if column in df.columns and value is not None:
                                 df.loc[mask, column] = value
+                        # Set processing type
+                        df.loc[mask, "Processing Type"] = processing_type
                     else:
                         # If no exact match found, update all rows with matching FMR name
                         mask = df["FMR"] == fmr_name
@@ -252,10 +187,12 @@ def process_fmr():
                             for column, value in results.items():
                                 if column in df.columns and value is not None:
                                     df.loc[mask, column] = value
+                            # Set processing type
+                            df.loc[mask, "Processing Type"] = processing_type
                     
                     # Save the updated database
                     df.to_csv(fmr_db_file, index=False)
-                    print(f"Database updated for FMR: {fmr_name}")
+                    print(f"Database updated for FMR: {fmr_name} (Processing Type: {processing_type})")
                     
                 except Exception as e:
                     print(f"Error updating database: {str(e)}")
@@ -390,78 +327,6 @@ def processing(vector_gdf, raster_path, image_type):
             "message": str(e)
         }
 
-def manual_processing(manual_fmrs, image_type):
-    ##raster_folder should contain all the images already
-    ##no distinction of images
-    raster_folder = bsg_folder
-
-    if not manual_fmrs:
-        return {"status": "error", "message": "No manual FMRs provided"}, 400
-
-    results = {}
-
-    for item in manual_fmrs:
-        name = item.get("name")
-        geometry = item.get("geometry")
-        if not name or not geometry:
-            results.append({
-                "fmr_name": name or "Unnamed", #should inform the user of the last FMR name, para susunod na lang sila. (e.g. if last fmr is FMR_333, they should input FMR_334)
-                "status": "error",
-                "message": "Missing name or geometry."
-            })
-            continue
-
-        drawn_gdf = gpd.GeoDataFrame.from_features([{
-            "type": "Feature",
-            "properties": {},
-            "geometry": geometry
-        }], crs="EPSG:4326").to_crs("EPSG:32651")
-
-        matched_image = None
-        for tif_file in os.listdir(raster_folder):
-            if not tif_file.endswith(".tif"):
-                continue
-            tif_path = os.path.join(raster_folder, tif_file)
-            with rasterio.open(tif_path) as src:
-                bounds = box(*src.bounds)
-                bounds = gpd.GeoSeries([bounds], crs=src.crs).to_crs("EPSG:32651").iloc[0]
-                if drawn_gdf.geometry.iloc[0].intersects(bounds):
-                    matched_image = tif_path
-                    break
-
-        if not matched_image:
-            results.append({
-                "fmr_name": name,
-                "status": "error",
-                "message": "No matching image found"
-            })
-            continue
-
-        try:
-            fmr_id = f"manual_{name.replace(' ', '_')}"
-            province = "Manual"
-            process_result = processing(
-                drawn_gdf,
-                matched_image,
-                image_type,
-                fmr_id,
-                province,
-                name
-            )
-            process_result["fmr_name"] = name
-            results.append(process_result)
-
-        except Exception as e:
-            import traceback
-            traceback.print_exc()
-            results.append({
-                "fmr_name": name,
-                "status": "error",
-                "message": str(e)
-            })
-
-    return {"status": "success", "results": results}, 200
-
 # ==========================================================
 # Original Flask Routes
 # ==========================================================
@@ -549,6 +414,7 @@ def getDatabase():
                     "FMR Progress": "",
                     "FMR Status": "", #08/07: COMPLETED/ON-GOING
                     "Mean FMR Width": "", #08/07
+                    "Processing Type": "",
                     "Image Path": data["path"]
                 })
 
@@ -569,6 +435,7 @@ def getDatabase():
                     "FMR Progress": "",
                     "FMR Status": "", #08/07
                     "Mean FMR Width": "", #08/07
+                    "Processing Type": "",
                     "Image Path": ""
                 })
 
@@ -587,6 +454,9 @@ def getDatabase():
 
     # === Part 4: Append and sort ===
     if not existing_df.empty:
+        # Add the new column to existing dataframe if it doesn't exist
+        if "Processing Type" not in existing_df.columns:
+            existing_df["Processing Type"] = ""
         final_df = pd.concat([existing_df, results_df], ignore_index=True)
     else:
         final_df = results_df
@@ -1330,12 +1200,40 @@ def main():
     """Main function to run the FMR GUI application."""
     print("Starting FMR Processing GUI...")
 
-    # Initialize the database and create initial map
-    print("Initializing FMR database...")
-    getDatabase()
+    # Update FMR shapefiles first (merge any new shapefiles into master)
+    print("Updating FMR shapefiles...")
+    try:
+        updateFMRs(shapefile_path)
+        print("FMR shapefiles updated successfully.")
+    except Exception as e:
+        print(f"Warning: Error updating FMR shapefiles: {e}")
+        print("Continuing with existing shapefile...")
+
+    try:
+        global gdf, filtered_gdf
+        gdf = gpd.read_file(shapefile_path).to_crs(epsg=4326)  # Reproject to WGS84
+        filtered_gdf = gdf.copy()
+        print(f"Loaded {len(gdf)} FMR features")
+    except Exception as e:
+        print(f"Error loading shapefile: {e}")
+        return
+
+    # Initialize/update the database
+    print("Initializing/updating FMR database...")
+    try:
+        getDatabase()
+        print("FMR database updated successfully")
+    except Exception as e:
+        print(f"Warning: Error updating database: {e}")
+        print("Continuing without database update...")
     
     print("Creating initial FMR map...")
-    create_fmr_map()
+    try:
+        create_fmr_map()
+        print("Initial map created successfully")
+    except Exception as e:
+        print(f"Error creating map: {e}")
+        return
     
     # Create and run the GUI application
     app = QApplication(sys.argv)
@@ -1349,8 +1247,8 @@ def main():
     main_window = FMRMainWindow()
     main_window.show()
     
-    print("✅ FMR GUI application ready!")
-    print("📍 Access the web interface at: http://127.0.0.1:5000")
+    print("FMR GUI application ready!")
+    print("Access the web interface at: http://127.0.0.1:5000")
     
     # Run the application
     sys.exit(app.exec_())
