@@ -1,6 +1,5 @@
 // PLease check 8/27
 // JavaScript logic for FMR GUI
-// add Selected FMRs panel logic with Run/Clear button state handling
 
 const selectedIds = new Set();
 const geoLayers = {};
@@ -12,13 +11,15 @@ const overlayLayers = {};  // key: image path, value: leaflet layer
 let manualFMRs = [];          // { id, selectedFmrId, geometry, layer }
 let manualFMRCounter = 0;
 
-function overlayImage({ image_base64, image_bounds }, imagePath) {
+// 08/27: Updated to use overlayKey (FMR+image) while keeping window._map safe
+function overlayImage({ image_base64, image_bounds }, overlayKey) {
     if (!window._map) {
         console.error('Map not available');
         return;
     }
     
-    const layerKey = `overlay_${btoa(imagePath).replace(/[^a-zA-Z0-9]/g, '')}`;
+    // Use overlayKey directly (already unique per FMR+image)
+    const layerKey = `overlay_${btoa(overlayKey).replace(/[^a-zA-Z0-9]/g, '')}`;
     
     // Remove existing overlay if it exists
     if (overlayLayers[layerKey]) {
@@ -42,24 +43,25 @@ function overlayImage({ image_base64, image_bounds }, imagePath) {
         img.addTo(window._map);
         overlayLayers[layerKey] = img;
         
-        console.log(`Added overlay for: ${imagePath}`);
+        console.log(`Added overlay for: ${overlayKey}`);
         
     } catch (error) {
         console.error('Error creating image overlay:', error);
     }
 }
 
-function removeOverlay(imagePath) {
-    if (!window._map || !imagePath) return;
+// 08/27: Updated to remove overlays by overlayKey
+function removeOverlay(overlayKey) {
+    if (!window._map || !overlayKey) return;
     
-    const layerKey = `overlay_${btoa(imagePath).replace(/[^a-zA-Z0-9]/g, '')}`;
+    const layerKey = `overlay_${btoa(overlayKey).replace(/[^a-zA-Z0-9]/g, '')}`;
     const layer = overlayLayers[layerKey];
     
     if (layer) {
         try {
             window._map.removeLayer(layer);
             delete overlayLayers[layerKey];
-            console.log(`Removed overlay for: ${imagePath}`);
+            console.log(`Removed overlay for: ${overlayKey}`);
         } catch (error) {
             console.error('Error removing overlay:', error);
         }
@@ -73,15 +75,18 @@ document.addEventListener('change', function (e) {
         const imagePath = checkbox.dataset.imagePath;
         const fmrId = parseInt(checkbox.dataset.fmrId);
 
+        // 08/27: Unique key per (FMR + image) to allow multiple cropped overlays
+        const overlayKey = `${fmrId}_${imagePath}`;
+
         if (checkbox.checked) {
             // Show loading indicator
             const label = checkbox.nextElementSibling;
             const originalText = label.textContent;
             label.textContent = originalText + ' (Loading...)';
             
-            if (imageCache[imagePath]) {
-                // Use cached image
-                overlayImage(imageCache[imagePath], imagePath);
+            if (imageCache[overlayKey]) {
+                // 08/27: Use cached overlay specific to this FMR+image
+                overlayImage(imageCache[overlayKey], overlayKey);
                 label.textContent = originalText;
             } else {
                 // Fetch and display image
@@ -101,13 +106,13 @@ document.addEventListener('change', function (e) {
                 })
                 .then(data => {
                     if (data.status === "success") {
-                        // Cache the image data
-                        imageCache[imagePath] = {
+                        // 08/27: Cache per unique key (not just imagePath)
+                        imageCache[overlayKey] = {
                             image_base64: data.image_data,
                             image_bounds: data.bounds
                         };
                         // Display the image
-                        overlayImage(imageCache[imagePath], imagePath);
+                        overlayImage(imageCache[overlayKey], overlayKey); // 08/27: pass overlayKey
                         label.textContent = originalText;
                     } else {
                         throw new Error(data.message || 'Failed to load image');
@@ -121,8 +126,8 @@ document.addEventListener('change', function (e) {
                 });
             }
         } else {
-            // Remove overlay when unchecked
-            removeOverlay(imagePath);
+            // 08/27: Remove overlay using unique key (FMR+image)
+            removeOverlay(overlayKey);
         }
     }
 });
