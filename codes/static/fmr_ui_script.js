@@ -179,6 +179,13 @@ document.head.appendChild(style);
 
 function updateFMRList() {
     const ul = document.getElementById("fmr-list");
+
+    // 08/27: Preserve checked state before rebuilding
+    const previouslyChecked = new Set();
+    document.querySelectorAll(".image-checkbox:checked").forEach(cb => {
+        previouslyChecked.add(`${cb.dataset.fmrId}_${cb.dataset.imagePath}`);
+    });
+
     ul.innerHTML = "";
 
     selectedIds.forEach(id => {
@@ -222,9 +229,13 @@ function updateFMRList() {
                 checkbox.id = `img-${id}-${idx}`;
                 checkbox.disabled = true;
 
+                // 08/27: Restore checked state if previously selected
+                if (previouslyChecked.has(`${id}_${img.path}`)) {
+                    checkbox.checked = true;
+                }
+
                 const label = document.createElement("label");
                 label.htmlFor = checkbox.id;
-                // 08/27: show filename + date from backend
                 const filename = img.filename || img.path.split(/[\\/]/).pop();
                 const date = img.date ? ` (${img.date})` : "";
                 label.textContent = " " + filename + date;
@@ -233,12 +244,10 @@ function updateFMRList() {
                 item.appendChild(label);
                 imageList.appendChild(item);
 
-                // Enable checkbox after short delay
                 setTimeout(() => {
                     checkbox.disabled = false;
                 }, 300);
 
-                // 08/27: Hook into checkbox toggle for Run button state
                 checkbox.addEventListener("change", updateRunButtonState);
             });
         } else {
@@ -252,14 +261,9 @@ function updateFMRList() {
         li.appendChild(imageList);
         ul.appendChild(li);
 
-        // Update FMR layer style
         const layer = geoLayers["geoLayer_" + id];
         if (layer) layer.setStyle({color: "red", weight: 3.5});
     });
-
-    // 08/27: Ensure Run + Clear buttons stay disabled until at least one image is checked
-    updateRunButtonState();
-    updateClearButtonState();
 }
 
 // 08/27: Enable/disable Run button dynamically
