@@ -894,23 +894,23 @@ def display_selected_image():
             return jsonify({"status": "error", "message": f"FMR ID {fmr_id} not found"}), 400
         
         fmr_geometry = gdf.loc[fmr_id].geometry
-        
         fmr_gdf = gpd.GeoDataFrame({"geometry": [fmr_geometry]}, crs="EPSG:4326")
-          
-        # print(f"Processing FMR {fmr_id} with image {image_path}")
-        # print(f"FMR geometry CRS: {fmr_gdf.crs}")
         
-        # Create image preview
+        # Create image preview clipped to this FMR
         preview = create_image_preview(image_path, fmr_gdf)
         
         if preview:
+            # 08/27: Generate unique overlay key (FMR + image)
+            overlay_key = f"{fmr_id}_{os.path.basename(image_path)}"
+
             return jsonify({
                 "status": "success",
                 "image_data": preview["base64"],
                 "bounds": preview["bounds"],
                 "fmr_id": fmr_id,
                 "image_name": image_name,
-                "image_path": image_path
+                "image_path": image_path,
+                "overlay_key": overlay_key  # 08/27: send back to frontend
             })
         else:
             return jsonify({"status": "error", "message": "Failed to create image preview"}), 500
