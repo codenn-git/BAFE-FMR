@@ -53,6 +53,8 @@ filtered_gdf = gdf.copy()
 # not yet finished, care of aina
 
 # 07/31: edited for consistency with changes in runProcessing and processFMR
+# Fixed version of the process_fmr function with better database update logic
+
 @app.route('/process_fmr', methods=['POST'])
 def process_fmr():
     """Process the selected FMR with the chosen workflow"""
@@ -63,7 +65,7 @@ def process_fmr():
     image_path = data.get("image_path")
     manual_fmr = data.get("manual_fmr")  # For manual workflow
     
-    fmr_db_file = os.path.join(os.path.dirname(shapefile_path), "fmr__database.csv")
+    fmr_db_file = os.path.join(os.path.dirname(shapefile_path), "fmr_database.csv")
 
     global selected_features, gdf
 
@@ -81,7 +83,8 @@ def process_fmr():
         }), 400
 
     try:
-        # 08/13: manually drawn FMR can now be read as a gdf
+        fmr_name = None  # Initialize fmr_name
+        
         if workflow_type == 'manual':
             # Expect: manual_fmr = { "selected_fmr_id": <int>, "geometry": <GeoJSON LineString> }
             mf = data.get("manual_fmr") or {}
@@ -100,7 +103,7 @@ def process_fmr():
             except Exception:
                 return jsonify({"status": "error", "message": f"Selected FMR id {sel_id} not found"}), 400
 
-            fmr_name = str(sel_row.get("name", f"FMR_{sel_id}"))
+            fmr_name = str(sel_row.get("name", f"FMR-{sel_id}"))
             fmr_geom_master = sel_row.geometry
 
             # Build GDF from drawn geometry (EPSG:4326 -> EPSG:32651)
@@ -116,9 +119,9 @@ def process_fmr():
             except Exception:
                 # fallback if master gdf crs is missing
                 planned_len_m = gpd.GeoSeries([fmr_geom_master], crs="EPSG:32651").length.iloc[0]
+
             drawn_len_m = drawn_gdf.length.iloc[0]
 
-            # Derive progress/status like your automatic logic
             progress = 0.0
             status = "Not Started"
             if planned_len_m and planned_len_m > 0:
@@ -131,7 +134,7 @@ def process_fmr():
                     status = "On-going"
 
             # Load DB
-            fmr_db_file = os.path.join(os.path.dirname(shapefile_path), "fmr__database.csv")
+            fmr_db_file = os.path.join(os.path.dirname(shapefile_path), "fmr_database.csv")
             if not os.path.exists(fmr_db_file):
                 return jsonify({"status": "error", "message": "FMR database not found"}), 404
 
@@ -153,6 +156,7 @@ def process_fmr():
             new_rows["Current FMR Length"] = float(drawn_len_m)
             new_rows["FMR Progress"] = float(progress)
             new_rows["FMR Status"] = status
+            new_rows["Processing Type"] = "manual"
             # Width unavailable in this manual-only step (no raster), blank out
             if "Mean FMR Width" in new_rows.columns:
                 new_rows["Mean FMR Width"] = ""
@@ -193,8 +197,15 @@ def process_fmr():
                     "message": f"FMR ID {fmr_id} is not selected"
                 }), 400
             
-            # Get FMR name for database lookup
-            fmr_name = str(gdf.loc[fmr_id].get("name", f"FMR_{fmr_id}"))
+            # Get FMR name for database lookup - FIXED: Better name extraction
+            fmr_row = gdf.loc[fmr_id]
+            if "name" in fmr_row and pd.notna(fmr_row["name"]):
+                fmr_name = str(fmr_row["name"])
+            else:
+                # Fallback to creating name from index
+                fmr_name = f"FMR-{fmr_id}"
+            
+            print(f"Processing FMR with name: {fmr_name}")  # Debug print
             
             # Handle image path validation and recovery
             if not image_path:
@@ -228,50 +239,92 @@ def process_fmr():
                 fmr_gdf = fmr_gdf.set_crs('EPSG:4326')
 
             processing_result = processing(fmr_gdf, image_path, image_type)
-            
-            # Update database with results
-            if processing_result.get("status") == "success" and os.path.exists(fmr_db_file):
-                try:
-                    df = pd.read_csv(fmr_db_file)
-                    
-                    # Extract results from the processing result
-                    results = processing_result.get("results", {})
-                    
-                    # Find the row(s) to update based on FMR name and image path
-                    mask = (df["FMR"] == fmr_name) & (df["Image Path"] == image_path)
-                    
-                    if mask.any():
-                        # Update existing rows
-                        for column, value in results.items():
-                            if column in df.columns and value is not None:
-                                df.loc[mask, column] = value
-                    else:
-                        # If no exact match found, update all rows with matching FMR name
-                        mask = df["FMR"] == fmr_name
-                        if mask.any():
-                            for column, value in results.items():
-                                if column in df.columns and value is not None:
-                                    df.loc[mask, column] = value
-                    
-                    # Save the updated database
-                    df.to_csv(fmr_db_file, index=False)
-                    print(f"Database updated for FMR: {fmr_name}")
-                    
-                except Exception as e:
-                    print(f"Error updating database: {str(e)}")
-                    # Don't fail the entire request if database update fails
-                    processing_result["database_update_error"] = str(e)
-
+        
         else:
             return jsonify({
                 "status": "error", 
                 "message": "Invalid workflow type. Must be 'manual' or 'automatic'"
             }), 400
+            
+        # FIXED: Better database update logic
+        if processing_result.get("status") == "success" and os.path.exists(fmr_db_file):
+            try:
+                df = pd.read_csv(fmr_db_file)
+                print(f"Loaded database with {len(df)} rows")  # Debug print
+                
+                # Add Processing Type column if it doesn't exist
+                if "Processing Type" not in df.columns:
+                    df["Processing Type"] = ""
+                
+                # Extract results from the processing result
+                results = processing_result.get("results", {})
+                print(f"Processing results: {results}")  # Debug print
+                
+                # Set processing type based on workflow
+                processing_type = "Manual" if workflow_type == 'manual' else "Planned"
+                
+                # FIXED: Better matching logic
+                print(f"Looking for FMR name: '{fmr_name}' and image path: '{image_path}'")
+                
+                # First try exact match with both FMR name and image path
+                if image_path:
+                    mask = (df["FMR"] == fmr_name) & (df["Image Path"] == image_path)
+                    print(f"Exact match found: {mask.sum()} rows")
+                else:
+                    mask = pd.Series([False] * len(df))
+                
+                # If no exact match, try matching just FMR name
+                if not mask.any():
+                    mask = df["FMR"] == fmr_name
+                    print(f"FMR name match found: {mask.sum()} rows")
+                
+                # If still no match, try matching with different FMR name formats
+                if not mask.any():
+                    # Try matching with "FMR_{id}" format
+                    alt_fmr_name = f"FMR_{fmr_id}" if workflow_type == 'automatic' else fmr_name
+                    mask = df["FMR"] == alt_fmr_name
+                    print(f"Alternative FMR name '{alt_fmr_name}' match found: {mask.sum()} rows")
+                
+                if mask.any():
+                    # Update existing rows
+                    print(f"Updating {mask.sum()} database rows...")
+                    for column, value in results.items():
+                        if column in df.columns and value is not None:
+                            df.loc[mask, column] = value
+                            print(f"Updated column '{column}' with value: {value}")
+                    
+                    # Set processing type
+                    df.loc[mask, "Processing Type"] = processing_type
+                    print(f"Set Processing Type to: {processing_type}")
+                    
+                    # Save the updated database
+                    df.to_csv(fmr_db_file, index=False)
+                    print(f"Database updated successfully for FMR: {fmr_name} (Processing Type: {processing_type})")
+                    
+                    # Add success message to processing result
+                    processing_result["database_updated"] = True
+                    processing_result["updated_rows"] = int(mask.sum())
+                    
+                else:
+                    print(f"No matching rows found in database for FMR: {fmr_name}")
+                    print("Available FMR names in database:")
+                    print(df["FMR"].unique()[:10])  # Print first 10 FMR names for debugging
+                    processing_result["database_update_warning"] = f"No matching rows found for FMR: {fmr_name}"
+                
+            except Exception as e:
+                print(f"Error updating database: {str(e)}")
+                import traceback
+                traceback.print_exc()
+                # Don't fail the entire request if database update fails
+                processing_result["database_update_error"] = str(e)
         
         # Return the processing result
         return jsonify(processing_result)
         
     except Exception as e:
+        print(f"Error in process_fmr: {str(e)}")
+        import traceback
+        traceback.print_exc()
         return jsonify({
             "status": "error", 
             "message": f"Processing failed: {str(e)}"
@@ -390,78 +443,6 @@ def processing(vector_gdf, raster_path, image_type):
             "message": str(e)
         }
 
-def manual_processing(manual_fmrs, image_type):
-    ##raster_folder should contain all the images already
-    ##no distinction of images
-    raster_folder = bsg_folder
-
-    if not manual_fmrs:
-        return {"status": "error", "message": "No manual FMRs provided"}, 400
-
-    results = {}
-
-    for item in manual_fmrs:
-        name = item.get("name")
-        geometry = item.get("geometry")
-        if not name or not geometry:
-            results.append({
-                "fmr_name": name or "Unnamed", #should inform the user of the last FMR name, para susunod na lang sila. (e.g. if last fmr is FMR_333, they should input FMR_334)
-                "status": "error",
-                "message": "Missing name or geometry."
-            })
-            continue
-
-        drawn_gdf = gpd.GeoDataFrame.from_features([{
-            "type": "Feature",
-            "properties": {},
-            "geometry": geometry
-        }], crs="EPSG:4326").to_crs("EPSG:32651")
-
-        matched_image = None
-        for tif_file in os.listdir(raster_folder):
-            if not tif_file.endswith(".tif"):
-                continue
-            tif_path = os.path.join(raster_folder, tif_file)
-            with rasterio.open(tif_path) as src:
-                bounds = box(*src.bounds)
-                bounds = gpd.GeoSeries([bounds], crs=src.crs).to_crs("EPSG:32651").iloc[0]
-                if drawn_gdf.geometry.iloc[0].intersects(bounds):
-                    matched_image = tif_path
-                    break
-
-        if not matched_image:
-            results.append({
-                "fmr_name": name,
-                "status": "error",
-                "message": "No matching image found"
-            })
-            continue
-
-        try:
-            fmr_id = f"manual_{name.replace(' ', '_')}"
-            province = "Manual"
-            process_result = processing(
-                drawn_gdf,
-                matched_image,
-                image_type,
-                fmr_id,
-                province,
-                name
-            )
-            process_result["fmr_name"] = name
-            results.append(process_result)
-
-        except Exception as e:
-            import traceback
-            traceback.print_exc()
-            results.append({
-                "fmr_name": name,
-                "status": "error",
-                "message": str(e)
-            })
-
-    return {"status": "success", "results": results}, 200
-
 # ==========================================================
 # Original Flask Routes
 # ==========================================================
@@ -471,7 +452,7 @@ def getDatabase():
 
     master_fmr = shapefile_path
     bsg_folder_path = bsg_folder
-    fmr_db_file = os.path.join(os.path.dirname(master_fmr), "fmr__database.csv")
+    fmr_db_file = os.path.join(os.path.dirname(master_fmr), "fmr_database.csv")
 
     # Load FMRs in EPSG:32651
     fmr_gdf = gpd.read_file(master_fmr).to_crs("EPSG:32651")
@@ -512,7 +493,7 @@ def getDatabase():
     # === Part 2: For each FMR, log all raster matches ===
     results = []
     for idx, row in fmr_gdf.iterrows():
-        fmr_name = str(row.get("name", f"FMR_{idx}"))
+        fmr_name = str(row.get("name", f"FMR-{idx}"))
         fmr_geom = row.geometry
         planned_length = fmr_geom.length
 
@@ -549,6 +530,7 @@ def getDatabase():
                     "FMR Progress": "",
                     "FMR Status": "", #08/07: COMPLETED/ON-GOING
                     "Mean FMR Width": "", #08/07
+                    "Processing Type": "",
                     "Image Path": data["path"]
                 })
 
@@ -569,6 +551,7 @@ def getDatabase():
                     "FMR Progress": "",
                     "FMR Status": "", #08/07
                     "Mean FMR Width": "", #08/07
+                    "Processing Type": "",
                     "Image Path": ""
                 })
 
@@ -587,6 +570,9 @@ def getDatabase():
 
     # === Part 4: Append and sort ===
     if not existing_df.empty:
+        # Add the new column to existing dataframe if it doesn't exist
+        if "Processing Type" not in existing_df.columns:
+            existing_df["Processing Type"] = ""
         final_df = pd.concat([existing_df, results_df], ignore_index=True)
     else:
         final_df = results_df
@@ -695,8 +681,8 @@ def create_image_preview(image_path, fmr_gdf):
 def get_matching_images():
     data = request.json
     fmr_id = data.get("fmr_id")
-    fmr_name = str(gdf.loc[fmr_id].get("name", f"FMR_{fmr_id}"))
-    fmr_db_file = os.path.join(os.path.dirname(shapefile_path), "fmr__database.csv")
+    fmr_name = str(gdf.loc[fmr_id].get("name", f"FMR-{fmr_id}"))
+    fmr_db_file = os.path.join(os.path.dirname(shapefile_path), "fmr_database.csv")
 
     if not os.path.exists(fmr_db_file):
         return jsonify({"status": "error", "message": "FMR database not found"}), 404
@@ -727,7 +713,7 @@ def get_matching_images():
 ## Added 07/28 2:04; for image-available FMR visibility
 @app.route('/get_fmrs_with_images', methods=['GET'])
 def get_fmrs_with_images():
-    fmr_db_file = os.path.join(os.path.dirname(shapefile_path), "fmr__database.csv")
+    fmr_db_file = os.path.join(os.path.dirname(shapefile_path), "fmr_database.csv")
 
     if not os.path.exists(fmr_db_file):
         return jsonify({"status": "error", "message": "FMR database not found"}), 404
@@ -736,7 +722,7 @@ def get_fmrs_with_images():
     df = df[df["Image Path"].notna() & df["Image Path"].astype(str).str.strip().ne("")]
 
     # Extract numeric index from "FMR" column like "FMR_0"
-    fmr_ids = df["FMR"].str.extract(r"FMR_(\d+)", expand=False).dropna().astype(int).unique().tolist()
+    fmr_ids = df["FMR"].str.extract(r"FMR-(\d+)", expand=False).dropna().astype(int).unique().tolist()
 
     return jsonify({"status": "success", "fmr_ids": fmr_ids})
 
@@ -830,13 +816,13 @@ def export_selected():
         # Determine export base name
         if len(ids) == 1:
             fmr_id = str(selected.iloc[0].get("FMR_ID", ids[0])) if "FMR_ID" in selected.columns else str(ids[0])
-            base_name = f"FMR_{fmr_id}"
+            base_name = f"FMR-{fmr_id}"
         else:
             if "FMR_ID" in selected.columns:
                 id_list = [str(row["FMR_ID"]) for _, row in selected.iterrows()]
             else:
                 id_list = [str(i) for i in ids]
-            base_name = f"multiFMR_{'_'.join(id_list)}"
+            base_name = f"multiFMR-{'-'.join(id_list)}"
 
         export_dir = os.path.dirname(shapefile_path)
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -941,7 +927,7 @@ def create_fmr_map(input_gdf=None):
         print("Shapefile is empty!")
         return ""
 
-    fmr_db_file = os.path.join(os.path.dirname(shapefile_path), "fmr__database.csv")
+    fmr_db_file = os.path.join(os.path.dirname(shapefile_path), "fmr_database.csv")
     fmr_database = None
     if os.path.exists(fmr_db_file):
         try:
@@ -958,11 +944,16 @@ def create_fmr_map(input_gdf=None):
         brgy = row.get("BRGY_NAME", "N/A")
         mun = row.get("MUN_NAME", "N/A")
         prov = row.get("PROV_NAME", "N/A")
-        fmr_name = str(row.get("name", f"FMR_{idx}"))
+        fmr_name = str(row.get("name", f"FMR-{idx}"))
 
         bsg_info = ""
         if fmr_database is not None:
             fmr_entries = fmr_database[(fmr_database["FMR"] == fmr_name) & (fmr_database["BSG"].notna()) & (fmr_database["BSG"] != "")]
+
+            # 08/22: Should filter out "manual" Processing types to avoid displaying duplicate image names in GUI
+            if "Processing Type" in fmr_database.columns:
+                fmr_entries = fmr_entries[~fmr_entries["Processing Type"].astype(str).str.lower().eq("manual")]
+            
             if not fmr_entries.empty:
                 bsg_info = "<b>Available BSG Images:</b><br>"
                 for _, db_row in fmr_entries.iterrows():
@@ -1216,12 +1207,12 @@ def create_fmr_map(input_gdf=None):
                     <select id=\"image-type\">
                         <option value=\"BSG\">BSG</option>
                         <option value=\"PNEO\">PNEO</option>
-                        <option value=\"SkySat\">PNEO</option>
+                        <option value=\"SkySat\">SkySat</option>
                     </select>
                 </div>
 
                 <div class=\"modal-buttons\">
-                    <button id=\"cancel-processing\" onclick=\"hideProcessingModal()\">Cancel</button>
+                    <button id=\"cancel-processing\" onclick=\"hideProcessingModal()\">Close</button>
                     <button id=\"run-processing\" onclick=\"runProcessing()\">Run</button>
                 </div>
             </div>
@@ -1325,17 +1316,69 @@ class FMRMainWindow(QMainWindow):
         print("Closing FMR GUI application...")
         event.accept()
 
+def migrate_database_add_processing_type():
+    """Add Processing Type column to existing database if it doesn't exist"""
+    fmr_db_file = os.path.join(os.path.dirname(shapefile_path), "fmr_database.csv")
+    
+    if not os.path.exists(fmr_db_file):
+        print("Database file does not exist, no migration needed.")
+        return
+    
+    try:
+        df = pd.read_csv(fmr_db_file)
+        
+        # Check if Processing Type column already exists
+        if "Processing Type" not in df.columns:
+            # Add the column with empty values
+            df["Processing Type"] = ""
+            
+            # Save the updated database
+            df.to_csv(fmr_db_file, index=False)
+            print("Successfully added 'Processing Type' column to existing database")
+        else:
+            print("'Processing Type' column already exists in database")
+            
+    except Exception as e:
+        print(f"Error during database migration: {str(e)}")
 
 def main():
     """Main function to run the FMR GUI application."""
     print("Starting FMR Processing GUI...")
 
-    # Initialize the database and create initial map
-    print("Initializing FMR database...")
-    getDatabase()
+    # Update FMR shapefiles first (merge any new shapefiles into master)
+    print("Updating FMR shapefiles...")
+    try:
+        updateFMRs(shapefile_path)
+        print("FMR shapefiles updated successfully.")
+    except Exception as e:
+        print(f"Warning: Error updating FMR shapefiles: {e}")
+        print("Continuing with existing shapefile...")
+
+    try:
+        global gdf, filtered_gdf
+        gdf = gpd.read_file(shapefile_path).to_crs(epsg=4326)  # Reproject to WGS84
+        filtered_gdf = gdf.copy()
+        print(f"Loaded {len(gdf)} FMR features")
+    except Exception as e:
+        print(f"Error loading shapefile: {e}")
+        return
+
+    # Initialize/update the database
+    print("Initializing/updating FMR database...")
+    try:
+        getDatabase()
+        print("FMR database updated successfully")
+    except Exception as e:
+        print(f"Warning: Error updating database: {e}")
+        print("Continuing without database update...")
     
     print("Creating initial FMR map...")
-    create_fmr_map()
+    try:
+        create_fmr_map()
+        print("Initial map created successfully")
+    except Exception as e:
+        print(f"Error creating map: {e}")
+        return
     
     # Create and run the GUI application
     app = QApplication(sys.argv)
@@ -1349,8 +1392,8 @@ def main():
     main_window = FMRMainWindow()
     main_window.show()
     
-    print("✅ FMR GUI application ready!")
-    print("📍 Access the web interface at: http://127.0.0.1:5000")
+    print("FMR GUI application ready!")
+    print("Access the web interface at: http://127.0.0.1:5000")
     
     # Run the application
     sys.exit(app.exec_())
