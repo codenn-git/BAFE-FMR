@@ -1,7 +1,6 @@
-// PLease check 8/13
+// PLease check 8/27
 // JavaScript logic for FMR GUI
-// Fixed: Multiple BSG images can now be displayed simultaneously
-// Optimized: Collapsible FMRs, scrollable panel, expand/collapse all, and lazy loading
+// add Selected FMRs panel logic with Run/Clear button state handling
 
 const selectedIds = new Set();
 const geoLayers = {};
@@ -187,6 +186,15 @@ function updateFMRList() {
         li.appendChild(header);
 
         const images = currentMatchingImages[id] || [];
+
+        // 08/27: remove duplicates by unique path
+        const seenPaths = new Set();
+        const uniqueImages = images.filter(img => {
+            if (seenPaths.has(img.path)) return false;
+            seenPaths.add(img.path);
+            return true;
+        });
+
         const imageList = document.createElement("ul");
         imageList.classList.add("image-list");
 
@@ -196,8 +204,8 @@ function updateFMRList() {
             icon.textContent = imageList.classList.contains("show") ? "▼" : "▶";
         });
 
-        if (images.length > 0) {
-            images.forEach((img, idx) => {
+        if (uniqueImages.length > 0) {
+            uniqueImages.forEach((img, idx) => {
                 const item = document.createElement("li");
                 item.classList.add("image-option");
 
@@ -211,7 +219,10 @@ function updateFMRList() {
 
                 const label = document.createElement("label");
                 label.htmlFor = checkbox.id;
-                label.textContent = " " + img.path.split(/[\\/]/).pop().split("-").slice(0, 4).join("-");
+                // 08/27: show filename + date from backend
+                const filename = img.filename || img.path.split(/[\\/]/).pop();
+                const date = img.date ? ` (${img.date})` : "";
+                label.textContent = " " + filename + date;
 
                 item.appendChild(checkbox);
                 item.appendChild(label);
@@ -221,6 +232,9 @@ function updateFMRList() {
                 setTimeout(() => {
                     checkbox.disabled = false;
                 }, 300);
+
+                // 08/27: Hook into checkbox toggle for Run button state
+                checkbox.addEventListener("change", updateRunButtonState);
             });
         } else {
             const note = document.createElement("div");
@@ -237,6 +251,20 @@ function updateFMRList() {
         const layer = geoLayers["geoLayer_" + id];
         if (layer) layer.setStyle({color: "red", weight: 3.5});
     });
+
+    // 08/27: Ensure Run + Clear buttons stay disabled until at least one image is checked
+    updateRunButtonState();
+    updateClearButtonState();
+}
+
+// 08/27: Enable/disable Run button dynamically
+function updateRunButtonState() {
+  const runBtn = document.getElementById("runBtn");
+  if (!runBtn) return;
+
+  // count selected checkboxes
+  const anySelected = document.querySelectorAll(".image-checkbox:checked").length > 0;
+  runBtn.disabled = !anySelected;
 }
 
 function toggleAllFMRs(expand) {
@@ -314,6 +342,7 @@ function clearSelections() {
         if (data.status === "cleared") {
             selectedIds.clear();
             updateRunButtonState();
+            updateClearButtonState();
             
             // Remove all overlays
             Object.keys(overlayLayers).forEach(key => {
@@ -394,6 +423,7 @@ function runProcessing() {
   const imageType = document.getElementById('image-type').value; // still passed to keep API stable
   const processType = document.querySelector('input[name="process-type"]:checked').value; // unused in manual here
 
+  // MANUAL PROCESSING
   if (workflowType === 'manual') {
     // validate rows
     const valid = manualFMRs.every(m => m.geometry && Number.isInteger(m.selectedFmrId));
@@ -411,7 +441,7 @@ function runProcessing() {
     return;
   }
 
-  // === keep your existing automatic processing logic below ===
+  
   const fmrIds = Array.from(selectedIds);
   const imagesToProcess = [];
   if (processType === 'selected') {
@@ -439,34 +469,34 @@ function runProcessing() {
 function processFMR(fmr_id, image_path, workflow_type, image_type, manualFMR = null) {
   const body = { workflow_type, image_type };
   if (workflow_type === 'manual' && manualFMR) {
-    body.manual_fmr = {
-      selected_fmr_id: manualFMR.selectedFmrId,
-      geometry: manualFMR.geometry
-    };
-  } else {
-    body.fmr_id = fmr_id;
-    body.image_path = image_path;
+        body.manual_fmr = {
+        selected_fmr_id: manualFMR.selectedFmrId,
+        geometry: manualFMR.geometry
+        };
+    } else {
+        body.fmr_id = fmr_id;
+        body.image_path = image_path;
   }
 
   fetch('/process_fmr', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(body)
-  })
-  .then(r => r.json())
-  .then(data => {
-    if (data.status === 'error') {
-      console.error('Processing error:', data.message);
-      alert(`Error: ${data.message}`);
-    } else {
-      console.log('Processing results:', data);
-      alert('Manual processing complete.');
-    }
-  })
-  .catch(err => {
-    console.error(err);
-    alert(`Error: ${err.message}`);
-  });
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body)
+    })
+    .then(r => r.json())
+    .then(data => {
+        if (data.status === 'error') {
+        console.error('Processing error:', data.message);
+        alert(`Error: ${data.message}`);
+        } else {
+        console.log('Processing results:', data);
+        alert('Processing complete.');
+        }
+    })
+    .catch(err => {
+        console.error(err);
+        alert(`Error: ${err.message}`);
+    });
 }
 
 // Update the run button state based on selections
@@ -474,6 +504,33 @@ function updateRunButtonState() {
     const runBtn = document.getElementById('runBtn');
     runBtn.disabled = selectedIds.size === 0;
 }
+
+// 08/27: Enable/disable Clear button depending on selected FMRs
+function updateClearButtonState() {
+    const clearBtn = document.getElementById("clearBtn");
+    if (selectedIds.size > 0) {
+        clearBtn.disabled = false;
+    } else {
+        clearBtn.disabled = true;
+    }
+}
+
+// 08/27: Collapsible main controls (hide/show instead of shrinking)
+document.addEventListener("DOMContentLoaded", () => {
+  const toggleBtn = document.getElementById("toggle-main-controls");
+  const mainControls = document.getElementById("selection-panel"); // target whole panel
+
+  if (toggleBtn && mainControls) {
+    toggleBtn.addEventListener("click", () => {
+      const isHidden = mainControls.style.display === "none";
+      mainControls.style.display = isHidden ? "block" : "none";
+      toggleBtn.title = isHidden ? "Hide Controls" : "Show Controls";
+    });
+
+    // start collapsed by default
+    mainControls.style.display = "none";
+  }
+});
 
 // Export functions for external use
 window.FMRUtils = {
