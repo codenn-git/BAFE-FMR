@@ -186,6 +186,19 @@ function updateFMRList() {
         previouslyChecked.add(`${cb.dataset.fmrId}_${cb.dataset.imagePath}`);
     });
 
+    // 08/27: Preserve expanded/collapsed state before rebuilding
+    const expandedState = {};
+    document.querySelectorAll(".fmr-item").forEach(item => {
+        const header = item.querySelector(".fmr-header");
+        const fmrLabel = header?.querySelector("span")?.textContent || "";
+        const fmrMatch = fmrLabel.match(/FMR-(\d+)/);
+        if (fmrMatch) {
+            const fmrId = fmrMatch[1];
+            const isExpanded = item.querySelector(".image-list")?.classList.contains("show");
+            expandedState[fmrId] = isExpanded;
+        }
+    });
+
     ul.innerHTML = "";
 
     selectedIds.forEach(id => {
@@ -199,7 +212,7 @@ function updateFMRList() {
 
         const images = currentMatchingImages[id] || [];
 
-        // 08/27: remove duplicates by unique path
+        // 08/27: Remove duplicates by unique path
         const seenPaths = new Set();
         const uniqueImages = images.filter(img => {
             if (seenPaths.has(img.path)) return false;
@@ -260,6 +273,13 @@ function updateFMRList() {
 
         li.appendChild(imageList);
         ul.appendChild(li);
+
+        // 08/27: Restore expanded/collapsed state
+        if (expandedState[id]) {
+            imageList.classList.add("show");
+            const icon = header.querySelector(".toggle-icon");
+            icon.textContent = "▼";
+        }
 
         const layer = geoLayers["geoLayer_" + id];
         if (layer) layer.setStyle({color: "red", weight: 3.5});
