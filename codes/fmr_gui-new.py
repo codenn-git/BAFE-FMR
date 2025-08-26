@@ -1,4 +1,4 @@
-# please check 8/13
+# please check 8/27
 
 import sys
 import os
@@ -703,7 +703,11 @@ def get_matching_images():
 
         for p in image_paths:
             if os.path.exists(p):
-                images.append({"filename": os.path.basename(p), "path": p})
+                images.append({
+                    "filename": os.path.basename(p),
+                    "path": p,
+                    "date": row.get("Date", "")  # 08/27: added date so JS can display it
+                })
 
     if not images:
         return jsonify({"status": "error", "message": "No valid image files found for FMR"}), 404
@@ -1015,7 +1019,7 @@ def create_fmr_map(input_gdf=None):
                 border-radius: 8px;
                 box-shadow: 0 2px 6px rgba(0,0,0,0.3);
                 z-index: 9999;
-                max-width: 300px;
+                width: 300px;
                 overflow-x: auto;
             }}
             #selection-panel ul {{
@@ -1039,6 +1043,18 @@ def create_fmr_map(input_gdf=None):
                 background-color: #e0e0e0;
                 color: #777777;
                 cursor: not-allowed;
+            }}
+            /* 08/27: Disabled Run button style */
+            #runBtn:disabled {{
+                background-color: #e0e0e0 !important;
+                color: #777777 !important;
+                cursor: not-allowed !important;
+            }}
+            /* 08/27: Disabled Clear button style */
+            #clearBtn:disabled {{
+                background-color: #e0e0e0 !important;
+                color: #777777 !important;
+                cursor: not-allowed !important;
             }}
             .image-preview {{
                 max-width: 300px;
@@ -1159,22 +1175,48 @@ def create_fmr_map(input_gdf=None):
             .draw-fmr-btn i {{
                 pointer-events: none; /* icon won't capture clicks */
             }}
+            #selected-fmrs-panel {{
+                position: fixed;
+                bottom: 20px;
+                right: 5px;
+                background: rgba(255,255,255,0.95);
+                padding: 10px;
+                border-radius: 8px;
+                box-shadow: 0 2px 6px rgba(0,0,0,0.3);
+                z-index: 9999;
+                max-width: 300px;
+                max-height: 50vh;
+                overflow-y: auto;
+            }}
         </style>
 
         <!------------ Selection Panel ------------>
         <div id="selection-panel">
+            <!-- 08/27: Selected FMRs has been removed since i made it a standalone panel -->
             <b>Province Filter:</b>
             <select id="provinceSelect" onchange="filterByProvince()">
                 <option value="All">All</option>
                 {province_options}
             </select>
-            <b>Selected FMR(s):</b>
-            <ul id="fmr-list"></ul>
-            <button id="runBtn" onclick="showProcessingModal()" disabled>Run</button>
             <button onclick="downloadSelected()">Export Selected</button>
-            <button class="clear-btn" onclick="clearSelections()">Clear</button>
             <button onclick="updateFMRs()">Update FMR</button>
             <div id="dynamic-processing-panel" style="margin-top: 20px;"></div>
+        </div>
+
+        <!-- 08/27: NEW PANEL for Selected FMRs -->
+        <div id="selected-fmrs-panel">
+            <b>Selected FMR(s):</b>
+            <ul id="fmr-list"></ul>
+            
+            <!-- 08/27: Run + Clear buttons relocated here -->
+            <button id="runBtn" onclick="showProcessingModal()" disabled 
+                    style="width: 100%; margin-top: 10px; background-color: #28a745; color: white; border: none; padding: 6px; border-radius: 4px; cursor: pointer;">
+                Run
+            </button>
+            <button id="clearBtn" onclick="clearSelections()" disabled
+                    style="width: 100%; margin-top: 6px; background-color: #dc3545; color: white; border: none; padding: 6px; border-radius: 4px; cursor: pointer;">
+                Clear
+            </button>
         </div>
 
         <!-- 08/05: Fixing polyline issue on whole Processing Modal. Added back the backlashes. Escape sequence error? -->
@@ -1223,6 +1265,18 @@ def create_fmr_map(input_gdf=None):
             <div class="leaflet-control leaflet-bar leaflet-control-image-toggle" title="Show FMRs with Satellite Images" onclick="toggleImageVisibility(this)">
                 <i class="fas fa-image"></i>
             </div>
+        </div>
+        
+        <!-- 08/27: Collapsible main controls button relocated here -->
+        <div id="toggle-main-controls" 
+            style="position: fixed; bottom: 5px; left: 5px; 
+                    background: #fff; 
+                    border-radius: 6px; 
+                    padding: 6px 8px; 
+                    box-shadow: 0 2px 6px rgba(0,0,0,0.4); 
+                    z-index: 10000; 
+                    cursor: pointer;">
+            <i class="fas fa-sliders-h"></i>
         </div>
     """
 
