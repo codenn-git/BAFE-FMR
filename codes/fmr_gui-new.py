@@ -448,7 +448,11 @@ def processing(vector_gdf, raster_path, image_type):
 # ==========================================================
 
 def getDatabase():
-    """Efficiently scan FMR and BSG images, log all raster-FMR matches (1 row per match), sorted numerically by FMR index and date. Skips entries that are already in the database."""
+    """Efficiently scan FMR and BSG images, log all raster-FMR matches (1 row per match),
+    sorted numerically by FMR index and date. Skips entries that are already in the database.
+    Uses sampling along the FMR line (instead of polygons) to check for nodata coverage.
+    Rejects if any part of the line touches nodata.
+    """
 
     master_fmr = shapefile_path
     bsg_folder_path = bsg_folder
@@ -500,39 +504,70 @@ def getDatabase():
         matched = False
 
         for tif_file, data in raster_bounds_dict.items():
-            if fmr_geom.intersects(data["bounds_geom"]):
-                matched = True
-                match = re.search(r"(\d{8})-(\d{6})", tif_file)
-                if match:
-                    raw_date, raw_time = match.groups()
-                    try:
-                        dt = datetime.strptime(raw_date + raw_time, "%Y%m%d%H%M%S")
-                        formatted_date = dt.strftime("%Y-%m-%d")
-                        formatted_time = dt.strftime("%H:%M:%S")
-                    except ValueError:
-                        formatted_date = ""
-                        formatted_time = ""
-                else:
-                    formatted_date = ""
-                    formatted_time = ""
+            tif_path = data["path"]
 
-                # Skip duplicates before appending
-                if (fmr_name, tif_file, formatted_date) in existing_keys:
-                    continue
+            try:
+                with rasterio.open(tif_path) as src:
+                    # Quick reject: if no bbox intersection
+                    if not fmr_geom.intersects(data["bounds_geom"]):
+                        continue
 
-                results.append({
-                    "FMR": fmr_name,
-                    "BSG": tif_file,
-                    "Date": formatted_date,
-                    "Time": formatted_time,
-                    "Planned FMR Length": planned_length,
-                    "Current FMR Length": "",
-                    "FMR Progress": "",
-                    "FMR Status": "", #08/07: COMPLETED/ON-GOING
-                    "Mean FMR Width": "", #08/07
-                    "Processing Type": "",
-                    "Image Path": data["path"]
-                })
+                    # 08/27 no data pixel check: reproject FMR into raster CRS
+                    geom_proj = gpd.GeoSeries([fmr_geom], crs=fmr_gdf.crs).to_crs(src.crs)
+                    fmr_line = geom_proj.iloc[0]
+
+                    # 08/27 no data pixel check: densify line into points
+                    N = 10  # meters between sample points
+                    num_segments = max(2, int(fmr_line.length / N))
+                    sample_points = [
+                        fmr_line.interpolate(dist) 
+                        for dist in np.linspace(0, fmr_line.length, num_segments)
+                    ]
+                    coords = [(pt.x, pt.y) for pt in sample_points]
+
+                    # Sample raster at those coordinates
+                    values = list(src.sample(coords))
+
+                    # Reject if any point lies on nodata
+                    nodata_val = src.nodata if src.nodata is not None else 0
+                    if any(val[0] == nodata_val or val[0] == 0 for val in values):
+                        continue
+
+            except Exception as e:
+                print(f"Error validating {tif_file} with FMR {fmr_name}: {e}")
+                continue
+
+            # If we reach here → real image fully covers the FMR
+            matched = True
+            match = re.search(r"(\d{8})-(\d{6})", tif_file)
+            if match:
+                raw_date, raw_time = match.groups()
+                try:
+                    dt = datetime.strptime(raw_date + raw_time, "%Y%m%d%H%M%S")
+                    formatted_date = dt.strftime("%Y-%m-%d")
+                    formatted_time = dt.strftime("%H:%M:%S")
+                except ValueError:
+                    formatted_date, formatted_time = "", ""
+            else:
+                formatted_date, formatted_time = "", ""
+
+            # Skip duplicates before appending
+            if (fmr_name, tif_file, formatted_date) in existing_keys:
+                continue
+
+            results.append({
+                "FMR": fmr_name,
+                "BSG": tif_file,
+                "Date": formatted_date,
+                "Time": formatted_time,
+                "Planned FMR Length": planned_length,
+                "Current FMR Length": "",
+                "FMR Progress": "",
+                "FMR Status": "",
+                "Mean FMR Width": "",
+                "Processing Type": "",
+                "Image Path": tif_path
+            })
 
         if not matched:
             # Check if this FMR already exists in DB with BSG=None
@@ -549,15 +584,15 @@ def getDatabase():
                     "Planned FMR Length": planned_length,
                     "Current FMR Length": "",
                     "FMR Progress": "",
-                    "FMR Status": "", #08/07
-                    "Mean FMR Width": "", #08/07
+                    "FMR Status": "",
+                    "Mean FMR Width": "",
                     "Processing Type": "",
                     "Image Path": ""
                 })
 
     # === Part 3: Create DataFrame and sort ===
     results_df = pd.DataFrame(results)
-    
+
     if results_df.empty:
         print("No new FMR/BSG matches found. Skipping database update.")
         return
@@ -566,11 +601,10 @@ def getDatabase():
     results_df["FMR_INDEX"] = results_df["FMR"].str.extract(r"(\d+)", expand=False).astype(int)
 
     # Ensure 'Date' is datetime for proper sorting
-    results_df["Date"] = pd.to_datetime(results_df["Date"], errors="coerce") 
+    results_df["Date"] = pd.to_datetime(results_df["Date"], errors="coerce")
 
     # === Part 4: Append and sort ===
     if not existing_df.empty:
-        # Add the new column to existing dataframe if it doesn't exist
         if "Processing Type" not in existing_df.columns:
             existing_df["Processing Type"] = ""
         final_df = pd.concat([existing_df, results_df], ignore_index=True)
@@ -584,8 +618,7 @@ def getDatabase():
 
     final_df.to_csv(fmr_db_file, index=False)
     print(f"Done! FMR database saved to:\n{fmr_db_file}")
-
-
+    
 def updateFMRs(master_path):
     """Merge other FMR shapefiles into the master FMR shapefile."""
     master_dir = os.path.dirname(master_path)
