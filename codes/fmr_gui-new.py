@@ -28,6 +28,11 @@ from flask_cors import CORS
 from waitress import serve
 from io import BytesIO
 
+## auto-updates mechanism for database
+from watchdog.observers import Observer
+from watchdog.events import FileSystemEventHandler
+from fmr_file_monitor import FMRFileMonitor, AutoUpdater
+
 from utilv2 import Preprocessing, Filters, Morph, MeasureWidth, measure_line, Interaction, export
 
 import matplotlib
@@ -37,6 +42,7 @@ matplotlib.use("Agg")
 shapefile_path = r"C:\Users\user-307E4B3400\OneDrive - Philippine Space Agency\SDMAD_SHARED\PROJECTS\SAKA\FMR\GUI\Master FMR\NE_master_fmr.shp"
 bsg_folder = r"C:\Users\user-307E4B3400\OneDrive - Philippine Space Agency\SDMAD_SHARED\PROJECTS\SAKA\FMR\GUI\Raster images"
 
+auto_updater = None #08/29: stores the updater
 # ==========================================================
 # Flask Setup
 app = Flask(__name__)
@@ -50,7 +56,7 @@ filtered_gdf = gdf.copy()
 
 # ==========================================================
 # Processing Functions
-# not yet finished, care of aina
+# not yet finished (Manual, Automatic working with bugs)
 
 # 07/31: edited for consistency with changes in runProcessing and processFMR
 # Fixed version of the process_fmr function with better database update logic
@@ -618,15 +624,21 @@ def getDatabase():
 
     final_df.to_csv(fmr_db_file, index=False)
     print(f"Done! FMR database saved to:\n{fmr_db_file}")
+
+## ================= 08/29: UPDATING DATABASE FUNCTIONS =============== ##
     
 def updateFMRs(master_path):
-    """Merge other FMR shapefiles into the master FMR shapefile."""
+    """Merge other FMR shapefiles into the master FMR shapefile with data type cleaning."""
     master_dir = os.path.dirname(master_path)
     master_name = os.path.splitext(os.path.basename(master_path))[0]
 
     master_gdf = gpd.read_file(master_path)
     master_crs = master_gdf.crs
     gdfs_to_merge = []
+    
+    # Clean the master GDF first
+    master_gdf = clean_gdf_for_shapefile(master_gdf)
+    
     for file in os.listdir(master_dir):
         if file.endswith('.shp'):
             base_name = os.path.splitext(file)[0]
@@ -636,16 +648,33 @@ def updateFMRs(master_path):
                     gdf = gpd.read_file(file_path)
                     if gdf.crs != master_crs:
                         gdf = gdf.to_crs(master_crs)
+                    
+                    # Clean the GDF before merging
+                    gdf = clean_gdf_for_shapefile(gdf)
                     gdfs_to_merge.append(gdf)
                 except Exception as e:
                     print(f"Could not read {file_path}: {e}")
 
     if gdfs_to_merge:
         merged_gdf = pd.concat([master_gdf] + gdfs_to_merge, ignore_index=True)
-        merged_gdf.to_file(master_path)
+        # Clean the merged GDF as well
+        merged_gdf = clean_gdf_for_shapefile(merged_gdf)
     else:
         merged_gdf = master_gdf
 
+    try:
+        merged_gdf.to_file(master_path)
+        print(f"Successfully updated master shapefile: {master_path}")
+    except Exception as e:
+        print(f"Error writing shapefile: {e}")
+        # Try with a more restrictive schema
+        try:
+            write_shapefile_with_schema(merged_gdf, master_path)
+        except Exception as e2:
+            print(f"Failed to write with custom schema: {e2}")
+            raise e2
+
+    # Move processed files to merged folder
     merged_folder = os.path.join(master_dir, "merged")
     os.makedirs(merged_folder, exist_ok=True)
 
@@ -654,7 +683,195 @@ def updateFMRs(master_path):
         if base_name != master_name and ext.lower() in ['.shp', '.shx', '.dbf', '.prj', '.cpg', '.qix']:
             full_file = os.path.join(master_dir, file)
             if os.path.isfile(full_file):
-                shutil.move(full_file, os.path.join(merged_folder, file))
+                try:
+                    shutil.move(full_file, os.path.join(merged_folder, file))
+                except Exception as e:
+                    print(f"Warning: Could not move {file}: {e}")
+
+def clean_gdf_for_shapefile(gdf):
+    """Clean GeoDataFrame to ensure compatibility with shapefile format."""
+    # Create a copy to avoid modifying the original
+    cleaned_gdf = gdf.copy()
+    
+    for column in cleaned_gdf.columns:
+        if column == 'geometry':
+            continue
+            
+        col_data = cleaned_gdf[column]
+        
+        # Check if column contains bytes objects
+        if col_data.dtype == object:
+            # Check if any values are bytes
+            has_bytes = any(isinstance(val, bytes) for val in col_data.dropna())
+            if has_bytes:
+                print(f"Converting bytes column '{column}' to string")
+                # Convert bytes to string, handle NaN values
+                cleaned_gdf[column] = col_data.apply(
+                    lambda x: x.decode('utf-8', errors='ignore') if isinstance(x, bytes) 
+                    else str(x) if pd.notna(x) else None
+                )
+        
+        # Handle other problematic data types
+        elif col_data.dtype.name.startswith('datetime'):
+            # Convert datetime to string for shapefile compatibility
+            print(f"Converting datetime column '{column}' to string")
+            cleaned_gdf[column] = col_data.dt.strftime('%Y-%m-%d %H:%M:%S')
+            
+        elif col_data.dtype.name in ['complex64', 'complex128']:
+            # Convert complex numbers to string
+            print(f"Converting complex column '{column}' to string")
+            cleaned_gdf[column] = col_data.astype(str)
+            
+        # Ensure string columns don't exceed shapefile field width limits
+        if cleaned_gdf[column].dtype == object:
+            # Check for overly long strings and truncate if necessary
+            max_length = 254  # DBF field limit
+            if cleaned_gdf[column].astype(str).str.len().max() > max_length:
+                print(f"Truncating long strings in column '{column}' to {max_length} characters")
+                cleaned_gdf[column] = cleaned_gdf[column].astype(str).str.slice(0, max_length)
+    
+    return cleaned_gdf
+
+def write_shapefile_with_schema(gdf, output_path):
+    """Write shapefile with explicitly defined schema to avoid data type issues."""
+    import fiona
+    from fiona.crs import from_epsg
+    
+    # Define schema with safe data types
+    schema = {
+        'geometry': 'LineString',  # Assuming FMRs are line features
+        'properties': {}
+    }
+    
+    # Examine each column and assign appropriate schema type
+    for column in gdf.columns:
+        if column == 'geometry':
+            continue
+            
+        col_data = gdf[column].dropna()
+        if len(col_data) == 0:
+            schema['properties'][column] = 'str:254'
+            continue
+            
+        # Sample a few values to determine type
+        sample_val = col_data.iloc[0] if len(col_data) > 0 else None
+        
+        if pd.api.types.is_numeric_dtype(gdf[column]):
+            if pd.api.types.is_integer_dtype(gdf[column]):
+                schema['properties'][column] = 'int:10'
+            else:
+                schema['properties'][column] = 'float:19.11'
+        else:
+            # Default to string for everything else
+            schema['properties'][column] = 'str:254'
+    
+    # Get CRS
+    crs = gdf.crs
+    if crs is None:
+        crs = from_epsg(4326)  # Default to WGS84
+    
+    # Write the shapefile
+    with fiona.open(
+        output_path,
+        'w',
+        driver='ESRI Shapefile',
+        crs=crs,
+        schema=schema
+    ) as output:
+        for idx, row in gdf.iterrows():
+            # Prepare properties dict with safe values
+            properties = {}
+            for column in gdf.columns:
+                if column == 'geometry':
+                    continue
+                
+                value = row[column]
+                if pd.isna(value):
+                    properties[column] = None
+                elif isinstance(value, bytes):
+                    properties[column] = value.decode('utf-8', errors='ignore')
+                else:
+                    properties[column] = value
+            
+            # Create feature
+            feature = {
+                'geometry': row['geometry'].__geo_interface__,
+                'properties': properties
+            }
+            
+            output.write(feature)
+    
+    print(f"Successfully wrote shapefile with custom schema: {output_path}")
+
+def cleanup_auto_updater(auto_updater):
+    """Clean up the file monitoring system"""
+    if auto_updater:
+        auto_updater.stop_monitoring()
+
+def create_improved_handle_update():
+    """Create an improved update handler with better error handling"""
+    def handle_update():
+        """Handle the update process with proper global variable access and error handling"""
+        global gdf, filtered_gdf
+        
+        try:
+            print("Auto-update triggered - updating FMR shapefiles...")
+            updateFMRs(shapefile_path)
+            
+            print("Reloading FMR data...")
+            # Add error handling for file reading
+            try:
+                gdf = gpd.read_file(shapefile_path).to_crs(epsg=4326)
+                filtered_gdf = gdf.copy()
+                print(f"Successfully reloaded {len(gdf)} FMR features")
+            except Exception as e:
+                print(f"Error reloading FMR data: {e}")
+                # Don't continue if we can't reload the data
+                return
+            
+            print("Updating FMR database...")
+            try:
+                getDatabase()
+                print("Database updated successfully")
+            except Exception as e:
+                print(f"Warning: Error updating database: {e}")
+                # Continue even if database update fails
+            
+            print("Recreating map with updated data...")
+            try:
+                create_fmr_map()
+                print("Map recreated successfully")
+            except Exception as e:
+                print(f"Warning: Error recreating map: {e}")
+                # Continue even if map recreation fails
+            
+            print("Auto-update completed successfully")
+            
+        except Exception as e:
+            print(f"Error during auto-update: {e}")
+            import traceback
+            traceback.print_exc()
+    
+    return handle_update
+
+def initialize_auto_updater():
+    """Initialize and start the automatic file monitoring system"""
+    
+    # Use the improved update handler
+    handle_update = create_improved_handle_update()
+    
+    auto_updater = AutoUpdater(
+        shapefile_path=shapefile_path,
+        raster_folder=bsg_folder,
+        update_fmr_callback=updateFMRs,
+        update_db_callback=getDatabase
+    )
+    
+    # Override the update callback to use our custom handler
+    auto_updater._handle_update = handle_update
+    
+    auto_updater.start_monitoring()
+    return auto_updater
 
 ## ================= DISPLAY FUNCTIONS =============== ##
 
@@ -765,7 +982,7 @@ def get_fmrs_with_images():
 
 @app.route('/')
 def serve_map():
-    return send_file(r"C:\Users\user-307E123400\Desktop\BAFE FMR\fmr_interactive_map.html")  # Path changed aina
+    return send_file(r"C:\Users\user-307E4B3400\Desktop\BAFE FMR\fmr_interactive_map.html")  # Path changed aina
 
 
 @app.route('/select', methods=['POST'])
@@ -798,7 +1015,7 @@ def clear_selections():
     return jsonify({"status": "cleared"})
 
 
-@app.route('/filter', methods=['POST'])
+@app.route('/filter_by_province', methods=['POST'])
 def filter_by_province():
     province = request.json.get("province")
     global filtered_gdf
@@ -810,19 +1027,21 @@ def filter_by_province():
         create_fmr_map(filtered_gdf)
         return jsonify({"status": "filtered", "count": len(filtered_gdf)})
 
-
-@app.route('/update_fmr', methods=['POST'])
-def update_fmr_route():
-    try:
-        updateFMRs(shapefile_path)
-        getDatabase()
-        global gdf, filtered_gdf
-        gdf = gpd.read_file(shapefile_path).to_crs(epsg=32651)
-        filtered_gdf = gdf.copy()
-        create_fmr_map(gdf)
-        return jsonify({"status": "success", "message": "FMR updated successfully"})
-    except Exception as e:
-        return jsonify({"status": "error", "message": str(e)}), 500
+#08/29: removed update_fmr_route, replaced with update status
+@app.route('/auto_update_status', methods=['GET'])
+def auto_update_status():
+    """Check if auto-update monitoring is active"""
+    global auto_updater
+    
+    status = {
+        "auto_update_enabled": auto_updater is not None and auto_updater.is_monitoring,
+        "monitoring_paths": {
+            "shapefile_dir": os.path.dirname(shapefile_path),
+            "raster_dir": bsg_folder
+        } if auto_updater else None
+    }
+    
+    return jsonify(status)
 
 
 @app.route('/export', methods=['POST'])
@@ -1221,19 +1440,31 @@ def create_fmr_map(input_gdf=None):
                 max-height: 50vh;
                 overflow-y: auto;
             }}
+
+            /*08/29: added update status*/
+            #auto-update-status {{
+                background-color: #d4edda;
+                border: 1px solid #c3e6cb;
+                color: #155724;
+                padding: 8px;
+                border-radius: 4px;
+                margin-top: 10px;
+                font-size: 0.9em;
+            }}
         </style>
 
         <!------------ Selection Panel ------------>
         <div id="selection-panel">
-            <!-- 08/27: Selected FMRs has been removed since i made it a standalone panel -->
+            <div id="selection-panel">
             <b>Province Filter:</b>
-            <select id="provinceSelect" onchange="filterByProvince()">
+            <select id="provinceSelect" onchange="filter_by_province()">
                 <option value="All">All</option>
                 {province_options}
             </select>
             <button onclick="downloadSelected()">Export Selected</button>
-            <button onclick="updateFMRs()">Update FMR</button>
+            <!-- 08/29: Update FMR button - now handled automatically -->
             <div id="dynamic-processing-panel" style="margin-top: 20px;"></div>
+    </div>
         </div>
 
         <!-- 08/27: NEW PANEL for Selected FMRs -->
@@ -1334,7 +1565,7 @@ def create_fmr_map(input_gdf=None):
         </script>
     """))
 
-    html_path = "C:/Users/user-307E123400/Desktop/BAFE FMR/fmr_interactive_map.html"
+    html_path = r"C:\Users\user-307E4B3400\Desktop\BAFE FMR\fmr_interactive_map.html"
     fmap.save(html_path)
     print("Interactive FMR map created: fmr_interactive_map.html")
     return os.path.abspath(html_path)
@@ -1346,12 +1577,12 @@ def create_fmr_map(input_gdf=None):
 class FMRMainWindow(QMainWindow):
     """Main window for the FMR GUI application."""
     
-    def __init__(self):
+    def __init__(self, auto_updater_instance=None):
         super().__init__()
+        self.auto_updater = auto_updater_instance
         self.init_ui()
         self.flask_thread = None
         self.start_flask_server()
-
         # self.start_workflow()
     
     ## Workflow selection, 
@@ -1367,7 +1598,7 @@ class FMRMainWindow(QMainWindow):
 
     def init_ui(self):
         """Initialize the user interface."""
-        self.setWindowTitle("FMR Processing GUI")
+        self.setWindowTitle("FMR Processing GUI - Auto-Update Enabled")  # Updated title
         self.setGeometry(100, 100, 1200, 800)
         
         # Create central widget and layout
@@ -1387,7 +1618,7 @@ class FMRMainWindow(QMainWindow):
         if self.flask_thread is None:
             self.flask_thread = threading.Thread(target=run_flask, daemon=True)
             self.flask_thread.start()
-            print("✅ Flask server started on http://127.0.0.1:5000")
+            print("Flask server started on http://127.0.0.1:5000")
         
     def load_map(self):
         """Load the FMR map in the web view."""
@@ -1401,6 +1632,12 @@ class FMRMainWindow(QMainWindow):
     def closeEvent(self, event):
         """Handle application close event."""
         print("Closing FMR GUI application...")
+        
+        # Stop file monitoring if it exists
+        if self.auto_updater:
+            print("Shutting down file monitoring...")
+            self.auto_updater.stop_monitoring()
+            
         event.accept()
 
 def migrate_database_add_processing_type():
@@ -1429,11 +1666,14 @@ def migrate_database_add_processing_type():
         print(f"Error during database migration: {str(e)}")
 
 def main():
-    """Main function to run the FMR GUI application."""
+    """08/29: Modified main function that includes automatic file monitoring"""
+    global auto_updater
+    
     print("Starting FMR Processing GUI...")
 
-    # Update FMR shapefiles first (merge any new shapefiles into master)
-    print("Updating FMR shapefiles...")
+    # Perform initial updates
+    print("Performing initial FMR and database update...")
+    
     try:
         updateFMRs(shapefile_path)
         print("FMR shapefiles updated successfully.")
@@ -1443,15 +1683,13 @@ def main():
 
     try:
         global gdf, filtered_gdf
-        gdf = gpd.read_file(shapefile_path).to_crs(epsg=4326)  # Reproject to WGS84
+        gdf = gpd.read_file(shapefile_path).to_crs(epsg=4326)
         filtered_gdf = gdf.copy()
         print(f"Loaded {len(gdf)} FMR features")
     except Exception as e:
         print(f"Error loading shapefile: {e}")
         return
 
-    # Initialize/update the database
-    print("Initializing/updating FMR database...")
     try:
         getDatabase()
         print("FMR database updated successfully")
@@ -1467,23 +1705,42 @@ def main():
         print(f"Error creating map: {e}")
         return
     
+    # Initialize auto-updater
+    print("Initializing automatic file monitoring...")
+    try:
+        auto_updater = initialize_auto_updater()
+        print("File monitoring started successfully")
+    except Exception as e:
+        print(f"Warning: Could not start file monitoring: {e}")
+        print("Manual updates will still be available")
+        auto_updater = None
+    
     # Create and run the GUI application
     app = QApplication(sys.argv)
-    
-    # Set application properties
     app.setApplicationName("FMR Processing GUI")
     app.setApplicationVersion("1.0")
     app.setOrganizationName("Philippine Space Agency")
     
     # Create and show main window
-    main_window = FMRMainWindow()
+    main_window = FMRMainWindow(auto_updater)
     main_window.show()
     
     print("FMR GUI application ready!")
+    
+    if auto_updater:
+        print("Automatic file monitoring is ACTIVE")
+        print("New shapefiles and images will be detected automatically")
+    else:
+        print("Automatic file monitoring is DISABLED")
     print("Access the web interface at: http://127.0.0.1:5000")
     
     # Run the application
-    sys.exit(app.exec_())
+    try:
+        sys.exit(app.exec_())
+    finally:
+        # Cleanup auto-updater on exit
+        if auto_updater:
+            auto_updater.stop_monitoring()
 
 
 if __name__ == "__main__":

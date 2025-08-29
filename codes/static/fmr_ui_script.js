@@ -398,19 +398,62 @@ function clearSelections() {
     });
 }
 
-function updateFMRs() {
-    if (confirm("Update FMR data? This may take a while.")) {
-        fetch("http://localhost:5000/update_fmr", {method: "POST"})
-        .then(res => res.json())
-        .then(data => {
-            if (data.status === "success") {
-                alert("FMR data updated successfully!");
-            } else {
-                alert(`Error updating FMR: ${data.message}`);
-            }
-        });
-    }
+// removed updateFMRs; replaced with autoU update functions
+function checkAutoUpdateStatus() {
+    fetch('/auto_update_status')
+    .then(res => res.json())
+    .then(data => {
+        if (data.auto_update_enabled) {
+            console.log('Auto-update monitoring is active');
+            console.log('Monitoring paths:', data.monitoring_paths);
+        } else {
+            console.log('Auto-update monitoring is disabled');
+        }
+    })
+    .catch(err => console.error('Error checking auto-update status:', err));
 }
+
+function displayAutoUpdateStatus() {
+    fetch('/auto_update_status')
+    .then(res => res.json())
+    .then(data => {
+        const panel = document.getElementById('selection-panel');
+        if (panel && data.auto_update_enabled) {
+            // Add a status indicator showing auto-update is active
+            const statusDiv = document.createElement('div');
+            statusDiv.id = 'auto-update-status';
+            statusDiv.style.cssText = `
+                background-color: #d4edda;
+                border: 1px solid #c3e6cb;
+                color: #155724;
+                padding: 8px;
+                border-radius: 4px;
+                margin-top: 10px;
+                font-size: 0.9em;
+            `;
+            statusDiv.innerHTML = '<strong>Auto-Update Active</strong><br>New files will be detected automatically';
+            
+            // Insert after province filter
+            const provinceSelect = document.getElementById('provinceSelect');
+            if (provinceSelect && provinceSelect.parentNode) {
+                provinceSelect.parentNode.insertBefore(statusDiv, provinceSelect.nextSibling);
+            }
+        }
+    })
+    .catch(err => console.error('Error displaying auto-update status:', err));
+}
+
+document.addEventListener('DOMContentLoaded', function() {
+    // Check auto-update status on page load
+    setTimeout(checkAutoUpdateStatus, 1000);
+    
+    // Display status in UI
+    setTimeout(displayAutoUpdateStatus, 1500);
+});
+
+setInterval(function() {
+    checkAutoUpdateStatus();
+}, 300000); // Check every 5 minutes
 
 // Additional utility functions for better overlay management
 function removeAllOverlays() {
