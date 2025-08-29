@@ -1,4 +1,4 @@
-# please check 8/13
+# please check 8/27
 
 import sys
 import os
@@ -86,25 +86,101 @@ def process_fmr():
         fmr_name = None  # Initialize fmr_name
         
         if workflow_type == 'manual':
-            # Handle manual workflow
-            if not manual_fmr or not manual_fmr.get('geometry') or not manual_fmr.get('name'):
+            # Expect: manual_fmr = { "selected_fmr_id": <int>, "geometry": <GeoJSON LineString> }
+            mf = data.get("manual_fmr") or {}
+            sel_id = mf.get("selected_fmr_id", None)
+            geom_json = mf.get("geometry", None)
+
+            if sel_id is None or geom_json is None:
                 return jsonify({
                     "status": "error",
-                    "message": "Manual workflow requires manual_fmr with geometry and name"
+                    "message": "Manual workflow requires manual_fmr with selected_fmr_id and geometry"
                 }), 400
-            
-            # Create GeoDataFrame from manual FMR geometry
+
+            # Resolve selected FMR (from master shapefile) and name
             try:
-                geom = shape(manual_fmr['geometry'])
-                fmr_gdf = gpd.GeoDataFrame({'geometry': [geom], 'name': [manual_fmr['name']]}, crs='EPSG:4326')
-                fmr_name = manual_fmr['name']  # Use the manual FMR name
+                sel_row = gdf.loc[sel_id]
+            except Exception:
+                return jsonify({"status": "error", "message": f"Selected FMR id {sel_id} not found"}), 400
+
+            fmr_name = str(sel_row.get("name", f"FMR-{sel_id}"))
+            fmr_geom_master = sel_row.geometry
+
+            # Build GDF from drawn geometry (EPSG:4326 -> EPSG:32651)
+            try:
+                drawn_geom = shape(geom_json)
+                drawn_gdf = gpd.GeoDataFrame({'geometry': [drawn_geom]}, crs='EPSG:4326').to_crs('EPSG:32651')
             except Exception as e:
-                return jsonify({
-                    "status": "error",
-                    "message": f"Invalid geometry in manual FMR: {str(e)}"
-                }), 400
-            
-            processing_result = processing(fmr_gdf, image_path, image_type)
+                return jsonify({"status": "error", "message": f"Invalid manual geometry: {str(e)}"}), 400
+
+            # Compute lengths (meters) in EPSG:32651
+            try:
+                planned_len_m = gpd.GeoSeries([fmr_geom_master], crs=gdf.crs).to_crs("EPSG:32651").length.iloc[0]
+            except Exception:
+                # fallback if master gdf crs is missing
+                planned_len_m = gpd.GeoSeries([fmr_geom_master], crs="EPSG:32651").length.iloc[0]
+
+            drawn_len_m = drawn_gdf.length.iloc[0]
+
+            progress = 0.0
+            status = "Not Started"
+            if planned_len_m and planned_len_m > 0:
+                progress = float((drawn_len_m / planned_len_m) * 100.0)
+                if progress > 90:
+                    status = "Completed"
+                elif progress == 0:
+                    status = "Not Started"
+                else:
+                    status = "On-going"
+
+            # Load DB
+            fmr_db_file = os.path.join(os.path.dirname(shapefile_path), "fmr_database_aina.csv")
+            if not os.path.exists(fmr_db_file):
+                return jsonify({"status": "error", "message": "FMR database not found"}), 404
+
+            df = pd.read_csv(fmr_db_file)
+
+            # Find all rows for this FMR name (block)
+            mask = (df["FMR"] == fmr_name)
+            if not mask.any():
+                return jsonify({"status": "error", "message": f"No rows found in database for FMR '{fmr_name}'"}), 404
+
+            original_rows = df.loc[mask].copy()
+
+            # Prepare duplicated rows (one per image row)
+            new_rows = original_rows.copy()
+
+            # Copy date/time/image/planned as-is, override measurement fields
+            # Coerce numeric where needed to avoid string concat issues
+            # Planned FMR Length: keep original values (already present)
+            new_rows["Current FMR Length"] = float(drawn_len_m)
+            new_rows["FMR Progress"] = float(progress)
+            new_rows["FMR Status"] = status
+            new_rows["Processing Type"] = "manual"
+            # Width unavailable in this manual-only step (no raster), blank out
+            if "Mean FMR Width" in new_rows.columns:
+                new_rows["Mean FMR Width"] = ""
+
+            # Insert right after the last of the original block
+            insert_after = df.index[mask][-1]
+            top = df.iloc[:insert_after + 1]
+            bottom = df.iloc[insert_after + 1:]
+            df_updated = pd.concat([top, new_rows, bottom], ignore_index=True)
+
+            # Persist
+            df_updated.to_csv(fmr_db_file, index=False)
+
+            # Build result payload
+            res = {
+                "FMR": fmr_name,
+                "Planned FMR Length": float(planned_len_m),
+                "Current FMR Length": float(drawn_len_m),
+                "FMR Progress": float(progress),
+                "FMR Status": status,
+                "inserted_rows": int(len(new_rows))
+            }
+
+            return jsonify({"status": "success", "results": res})
             
         elif workflow_type == 'automatic':
             # Handle automatic workflow
@@ -372,7 +448,11 @@ def processing(vector_gdf, raster_path, image_type):
 # ==========================================================
 
 def getDatabase():
-    """Efficiently scan FMR and BSG images, log all raster-FMR matches (1 row per match), sorted numerically by FMR index and date. Skips entries that are already in the database."""
+    """Efficiently scan FMR and BSG images, log all raster-FMR matches (1 row per match),
+    sorted numerically by FMR index and date. Skips entries that are already in the database.
+    Uses sampling along the FMR line (instead of polygons) to check for nodata coverage.
+    Rejects if any part of the line touches nodata.
+    """
 
     master_fmr = shapefile_path
     bsg_folder_path = bsg_folder
@@ -424,39 +504,70 @@ def getDatabase():
         matched = False
 
         for tif_file, data in raster_bounds_dict.items():
-            if fmr_geom.intersects(data["bounds_geom"]):
-                matched = True
-                match = re.search(r"(\d{8})-(\d{6})", tif_file)
-                if match:
-                    raw_date, raw_time = match.groups()
-                    try:
-                        dt = datetime.strptime(raw_date + raw_time, "%Y%m%d%H%M%S")
-                        formatted_date = dt.strftime("%Y-%m-%d")
-                        formatted_time = dt.strftime("%H:%M:%S")
-                    except ValueError:
-                        formatted_date = ""
-                        formatted_time = ""
-                else:
-                    formatted_date = ""
-                    formatted_time = ""
+            tif_path = data["path"]
 
-                # Skip duplicates before appending
-                if (fmr_name, tif_file, formatted_date) in existing_keys:
-                    continue
+            try:
+                with rasterio.open(tif_path) as src:
+                    # Quick reject: if no bbox intersection
+                    if not fmr_geom.intersects(data["bounds_geom"]):
+                        continue
 
-                results.append({
-                    "FMR": fmr_name,
-                    "BSG": tif_file,
-                    "Date": formatted_date,
-                    "Time": formatted_time,
-                    "Planned FMR Length": planned_length,
-                    "Current FMR Length": "",
-                    "FMR Progress": "",
-                    "FMR Status": "", #08/07: COMPLETED/ON-GOING
-                    "Mean FMR Width": "", #08/07
-                    "Processing Type": "",
-                    "Image Path": data["path"]
-                })
+                    # 08/27 no data pixel check: reproject FMR into raster CRS
+                    geom_proj = gpd.GeoSeries([fmr_geom], crs=fmr_gdf.crs).to_crs(src.crs)
+                    fmr_line = geom_proj.iloc[0]
+
+                    # 08/27 no data pixel check: densify line into points
+                    N = 10  # meters between sample points
+                    num_segments = max(2, int(fmr_line.length / N))
+                    sample_points = [
+                        fmr_line.interpolate(dist) 
+                        for dist in np.linspace(0, fmr_line.length, num_segments)
+                    ]
+                    coords = [(pt.x, pt.y) for pt in sample_points]
+
+                    # Sample raster at those coordinates
+                    values = list(src.sample(coords))
+
+                    # Reject if any point lies on nodata
+                    nodata_val = src.nodata if src.nodata is not None else 0
+                    if any(val[0] == nodata_val or val[0] == 0 for val in values):
+                        continue
+
+            except Exception as e:
+                print(f"Error validating {tif_file} with FMR {fmr_name}: {e}")
+                continue
+
+            # If we reach here → real image fully covers the FMR
+            matched = True
+            match = re.search(r"(\d{8})-(\d{6})", tif_file)
+            if match:
+                raw_date, raw_time = match.groups()
+                try:
+                    dt = datetime.strptime(raw_date + raw_time, "%Y%m%d%H%M%S")
+                    formatted_date = dt.strftime("%Y-%m-%d")
+                    formatted_time = dt.strftime("%H:%M:%S")
+                except ValueError:
+                    formatted_date, formatted_time = "", ""
+            else:
+                formatted_date, formatted_time = "", ""
+
+            # Skip duplicates before appending
+            if (fmr_name, tif_file, formatted_date) in existing_keys:
+                continue
+
+            results.append({
+                "FMR": fmr_name,
+                "BSG": tif_file,
+                "Date": formatted_date,
+                "Time": formatted_time,
+                "Planned FMR Length": planned_length,
+                "Current FMR Length": "",
+                "FMR Progress": "",
+                "FMR Status": "",
+                "Mean FMR Width": "",
+                "Processing Type": "",
+                "Image Path": tif_path
+            })
 
         if not matched:
             # Check if this FMR already exists in DB with BSG=None
@@ -473,15 +584,15 @@ def getDatabase():
                     "Planned FMR Length": planned_length,
                     "Current FMR Length": "",
                     "FMR Progress": "",
-                    "FMR Status": "", #08/07
-                    "Mean FMR Width": "", #08/07
+                    "FMR Status": "",
+                    "Mean FMR Width": "",
                     "Processing Type": "",
                     "Image Path": ""
                 })
 
     # === Part 3: Create DataFrame and sort ===
     results_df = pd.DataFrame(results)
-    
+
     if results_df.empty:
         print("No new FMR/BSG matches found. Skipping database update.")
         return
@@ -490,11 +601,10 @@ def getDatabase():
     results_df["FMR_INDEX"] = results_df["FMR"].str.extract(r"(\d+)", expand=False).astype(int)
 
     # Ensure 'Date' is datetime for proper sorting
-    results_df["Date"] = pd.to_datetime(results_df["Date"], errors="coerce") 
+    results_df["Date"] = pd.to_datetime(results_df["Date"], errors="coerce")
 
     # === Part 4: Append and sort ===
     if not existing_df.empty:
-        # Add the new column to existing dataframe if it doesn't exist
         if "Processing Type" not in existing_df.columns:
             existing_df["Processing Type"] = ""
         final_df = pd.concat([existing_df, results_df], ignore_index=True)
@@ -508,8 +618,7 @@ def getDatabase():
 
     final_df.to_csv(fmr_db_file, index=False)
     print(f"Done! FMR database saved to:\n{fmr_db_file}")
-
-
+    
 def updateFMRs(master_path):
     """Merge other FMR shapefiles into the master FMR shapefile."""
     master_dir = os.path.dirname(master_path)
@@ -627,7 +736,11 @@ def get_matching_images():
 
         for p in image_paths:
             if os.path.exists(p):
-                images.append({"filename": os.path.basename(p), "path": p})
+                images.append({
+                    "filename": os.path.basename(p),
+                    "path": p,
+                    "date": row.get("Date", "")  # 08/27: added date so JS can display it
+                })
 
     if not images:
         return jsonify({"status": "error", "message": "No valid image files found for FMR"}), 404
@@ -652,7 +765,7 @@ def get_fmrs_with_images():
 
 @app.route('/')
 def serve_map():
-    return send_file(r"C:\Users\user-307E4B3400\Desktop\BAFE FMR\fmr_interactive_map.html")  # Path changed aina
+    return send_file(r"C:\Users\user-307E123400\Desktop\BAFE FMR\fmr_interactive_map.html")  # Path changed aina
 
 
 @app.route('/select', methods=['POST'])
@@ -814,23 +927,23 @@ def display_selected_image():
             return jsonify({"status": "error", "message": f"FMR ID {fmr_id} not found"}), 400
         
         fmr_geometry = gdf.loc[fmr_id].geometry
-        
         fmr_gdf = gpd.GeoDataFrame({"geometry": [fmr_geometry]}, crs="EPSG:4326")
-          
-        # print(f"Processing FMR {fmr_id} with image {image_path}")
-        # print(f"FMR geometry CRS: {fmr_gdf.crs}")
         
-        # Create image preview
+        # Create image preview clipped to this FMR
         preview = create_image_preview(image_path, fmr_gdf)
         
         if preview:
+            # 08/27: Generate unique overlay key (FMR + image)
+            overlay_key = f"{fmr_id}_{os.path.basename(image_path)}"
+
             return jsonify({
                 "status": "success",
                 "image_data": preview["base64"],
                 "bounds": preview["bounds"],
                 "fmr_id": fmr_id,
                 "image_name": image_name,
-                "image_path": image_path
+                "image_path": image_path,
+                "overlay_key": overlay_key  # 08/27: send back to frontend
             })
         else:
             return jsonify({"status": "error", "message": "Failed to create image preview"}), 500
@@ -939,7 +1052,7 @@ def create_fmr_map(input_gdf=None):
                 border-radius: 8px;
                 box-shadow: 0 2px 6px rgba(0,0,0,0.3);
                 z-index: 9999;
-                max-width: 300px;
+                width: 300px;
                 overflow-x: auto;
             }}
             #selection-panel ul {{
@@ -963,6 +1076,18 @@ def create_fmr_map(input_gdf=None):
                 background-color: #e0e0e0;
                 color: #777777;
                 cursor: not-allowed;
+            }}
+            /* 08/27: Disabled Run button style */
+            #runBtn:disabled {{
+                background-color: #e0e0e0 !important;
+                color: #777777 !important;
+                cursor: not-allowed !important;
+            }}
+            /* 08/27: Disabled Clear button style */
+            #clearBtn:disabled {{
+                background-color: #e0e0e0 !important;
+                color: #777777 !important;
+                cursor: not-allowed !important;
             }}
             .image-preview {{
                 max-width: 300px;
@@ -1083,22 +1208,48 @@ def create_fmr_map(input_gdf=None):
             .draw-fmr-btn i {{
                 pointer-events: none; /* icon won't capture clicks */
             }}
+            #selected-fmrs-panel {{
+                position: fixed;
+                bottom: 20px;
+                right: 5px;
+                background: rgba(255,255,255,0.95);
+                padding: 10px;
+                border-radius: 8px;
+                box-shadow: 0 2px 6px rgba(0,0,0,0.3);
+                z-index: 9999;
+                max-width: 300px;
+                max-height: 50vh;
+                overflow-y: auto;
+            }}
         </style>
 
         <!------------ Selection Panel ------------>
         <div id="selection-panel">
+            <!-- 08/27: Selected FMRs has been removed since i made it a standalone panel -->
             <b>Province Filter:</b>
             <select id="provinceSelect" onchange="filterByProvince()">
                 <option value="All">All</option>
                 {province_options}
             </select>
-            <b>Selected FMR(s):</b>
-            <ul id="fmr-list"></ul>
-            <button id="runBtn" onclick="showProcessingModal()" disabled>Run</button>
             <button onclick="downloadSelected()">Export Selected</button>
-            <button class="clear-btn" onclick="clearSelections()">Clear</button>
             <button onclick="updateFMRs()">Update FMR</button>
             <div id="dynamic-processing-panel" style="margin-top: 20px;"></div>
+        </div>
+
+        <!-- 08/27: NEW PANEL for Selected FMRs -->
+        <div id="selected-fmrs-panel">
+            <b>Selected FMR(s):</b>
+            <ul id="fmr-list"></ul>
+            
+            <!-- 08/27: Run + Clear buttons relocated here -->
+            <button id="runBtn" onclick="showProcessingModal()" disabled 
+                    style="width: 100%; margin-top: 10px; background-color: #28a745; color: white; border: none; padding: 6px; border-radius: 4px; cursor: pointer;">
+                Run
+            </button>
+            <button id="clearBtn" onclick="clearSelections()" disabled
+                    style="width: 100%; margin-top: 6px; background-color: #dc3545; color: white; border: none; padding: 6px; border-radius: 4px; cursor: pointer;">
+                Clear
+            </button>
         </div>
 
         <!-- 08/05: Fixing polyline issue on whole Processing Modal. Added back the backlashes. Escape sequence error? -->
@@ -1148,6 +1299,18 @@ def create_fmr_map(input_gdf=None):
                 <i class="fas fa-image"></i>
             </div>
         </div>
+        
+        <!-- 08/27: Collapsible main controls button relocated here -->
+        <div id="toggle-main-controls" 
+            style="position: fixed; bottom: 5px; left: 5px; 
+                    background: #fff; 
+                    border-radius: 6px; 
+                    padding: 6px 8px; 
+                    box-shadow: 0 2px 6px rgba(0,0,0,0.4); 
+                    z-index: 10000; 
+                    cursor: pointer;">
+            <i class="fas fa-sliders-h"></i>
+        </div>
     """
 
     fmap.get_root().html.add_child(folium.Element(js_ui))
@@ -1171,7 +1334,7 @@ def create_fmr_map(input_gdf=None):
         </script>
     """))
 
-    html_path = "C:/Users/user-307E4B3400/Desktop/BAFE FMR/fmr_interactive_map.html"
+    html_path = "C:/Users/user-307E123400/Desktop/BAFE FMR/fmr_interactive_map.html"
     fmap.save(html_path)
     print("Interactive FMR map created: fmr_interactive_map.html")
     return os.path.abspath(html_path)

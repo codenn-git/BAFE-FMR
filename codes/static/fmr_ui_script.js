@@ -1,7 +1,5 @@
-// PLease check 8/13
+// PLease check 8/27
 // JavaScript logic for FMR GUI
-// Fixed: Multiple BSG images can now be displayed simultaneously
-// Optimized: Collapsible FMRs, scrollable panel, expand/collapse all, and lazy loading
 
 const selectedIds = new Set();
 const geoLayers = {};
@@ -13,13 +11,15 @@ const overlayLayers = {};  // key: image path, value: leaflet layer
 let manualFMRs = [];          // { id, selectedFmrId, geometry, layer }
 let manualFMRCounter = 0;
 
-function overlayImage({ image_base64, image_bounds }, imagePath) {
+// 08/27: Updated to use overlayKey (FMR+image) while keeping window._map safe
+function overlayImage({ image_base64, image_bounds }, overlayKey) {
     if (!window._map) {
         console.error('Map not available');
         return;
     }
     
-    const layerKey = `overlay_${btoa(imagePath).replace(/[^a-zA-Z0-9]/g, '')}`;
+    // Use overlayKey directly (already unique per FMR+image)
+    const layerKey = `overlay_${btoa(overlayKey).replace(/[^a-zA-Z0-9]/g, '')}`;
     
     // Remove existing overlay if it exists
     if (overlayLayers[layerKey]) {
@@ -43,24 +43,25 @@ function overlayImage({ image_base64, image_bounds }, imagePath) {
         img.addTo(window._map);
         overlayLayers[layerKey] = img;
         
-        console.log(`Added overlay for: ${imagePath}`);
+        console.log(`Added overlay for: ${overlayKey}`);
         
     } catch (error) {
         console.error('Error creating image overlay:', error);
     }
 }
 
-function removeOverlay(imagePath) {
-    if (!window._map || !imagePath) return;
+// 08/27: Updated to remove overlays by overlayKey
+function removeOverlay(overlayKey) {
+    if (!window._map || !overlayKey) return;
     
-    const layerKey = `overlay_${btoa(imagePath).replace(/[^a-zA-Z0-9]/g, '')}`;
+    const layerKey = `overlay_${btoa(overlayKey).replace(/[^a-zA-Z0-9]/g, '')}`;
     const layer = overlayLayers[layerKey];
     
     if (layer) {
         try {
             window._map.removeLayer(layer);
             delete overlayLayers[layerKey];
-            console.log(`Removed overlay for: ${imagePath}`);
+            console.log(`Removed overlay for: ${overlayKey}`);
         } catch (error) {
             console.error('Error removing overlay:', error);
         }
@@ -74,15 +75,18 @@ document.addEventListener('change', function (e) {
         const imagePath = checkbox.dataset.imagePath;
         const fmrId = parseInt(checkbox.dataset.fmrId);
 
+        // 08/27: Unique key per (FMR + image) to allow multiple cropped overlays
+        const overlayKey = `${fmrId}_${imagePath}`;
+
         if (checkbox.checked) {
             // Show loading indicator
             const label = checkbox.nextElementSibling;
             const originalText = label.textContent;
             label.textContent = originalText + ' (Loading...)';
             
-            if (imageCache[imagePath]) {
-                // Use cached image
-                overlayImage(imageCache[imagePath], imagePath);
+            if (imageCache[overlayKey]) {
+                // 08/27: Use cached overlay specific to this FMR+image
+                overlayImage(imageCache[overlayKey], overlayKey);
                 label.textContent = originalText;
             } else {
                 // Fetch and display image
@@ -102,13 +106,13 @@ document.addEventListener('change', function (e) {
                 })
                 .then(data => {
                     if (data.status === "success") {
-                        // Cache the image data
-                        imageCache[imagePath] = {
+                        // 08/27: Cache per unique key (not just imagePath)
+                        imageCache[overlayKey] = {
                             image_base64: data.image_data,
                             image_bounds: data.bounds
                         };
                         // Display the image
-                        overlayImage(imageCache[imagePath], imagePath);
+                        overlayImage(imageCache[overlayKey], overlayKey); // 08/27: pass overlayKey
                         label.textContent = originalText;
                     } else {
                         throw new Error(data.message || 'Failed to load image');
@@ -122,8 +126,8 @@ document.addEventListener('change', function (e) {
                 });
             }
         } else {
-            // Remove overlay when unchecked
-            removeOverlay(imagePath);
+            // 08/27: Remove overlay using unique key (FMR+image)
+            removeOverlay(overlayKey);
         }
     }
 });
@@ -175,6 +179,26 @@ document.head.appendChild(style);
 
 function updateFMRList() {
     const ul = document.getElementById("fmr-list");
+
+    // 08/27: Preserve checked state before rebuilding
+    const previouslyChecked = new Set();
+    document.querySelectorAll(".image-checkbox:checked").forEach(cb => {
+        previouslyChecked.add(`${cb.dataset.fmrId}_${cb.dataset.imagePath}`);
+    });
+
+    // 08/27: Preserve expanded/collapsed state before rebuilding
+    const expandedState = {};
+    document.querySelectorAll(".fmr-item").forEach(item => {
+        const header = item.querySelector(".fmr-header");
+        const fmrLabel = header?.querySelector("span")?.textContent || "";
+        const fmrMatch = fmrLabel.match(/FMR-(\d+)/);
+        if (fmrMatch) {
+            const fmrId = fmrMatch[1];
+            const isExpanded = item.querySelector(".image-list")?.classList.contains("show");
+            expandedState[fmrId] = isExpanded;
+        }
+    });
+
     ul.innerHTML = "";
 
     selectedIds.forEach(id => {
@@ -187,6 +211,15 @@ function updateFMRList() {
         li.appendChild(header);
 
         const images = currentMatchingImages[id] || [];
+
+        // 08/27: Remove duplicates by unique path
+        const seenPaths = new Set();
+        const uniqueImages = images.filter(img => {
+            if (seenPaths.has(img.path)) return false;
+            seenPaths.add(img.path);
+            return true;
+        });
+
         const imageList = document.createElement("ul");
         imageList.classList.add("image-list");
 
@@ -196,8 +229,8 @@ function updateFMRList() {
             icon.textContent = imageList.classList.contains("show") ? "▼" : "▶";
         });
 
-        if (images.length > 0) {
-            images.forEach((img, idx) => {
+        if (uniqueImages.length > 0) {
+            uniqueImages.forEach((img, idx) => {
                 const item = document.createElement("li");
                 item.classList.add("image-option");
 
@@ -209,18 +242,26 @@ function updateFMRList() {
                 checkbox.id = `img-${id}-${idx}`;
                 checkbox.disabled = true;
 
+                // 08/27: Restore checked state if previously selected
+                if (previouslyChecked.has(`${id}_${img.path}`)) {
+                    checkbox.checked = true;
+                }
+
                 const label = document.createElement("label");
                 label.htmlFor = checkbox.id;
-                label.textContent = " " + img.path.split(/[\\/]/).pop().split("-").slice(0, 4).join("-");
+                const filename = img.filename || img.path.split(/[\\/]/).pop();
+                const date = img.date ? ` (${img.date})` : "";
+                label.textContent = " " + filename + date;
 
                 item.appendChild(checkbox);
                 item.appendChild(label);
                 imageList.appendChild(item);
 
-                // Enable checkbox after short delay
                 setTimeout(() => {
                     checkbox.disabled = false;
                 }, 300);
+
+                checkbox.addEventListener("change", updateRunButtonState);
             });
         } else {
             const note = document.createElement("div");
@@ -233,10 +274,26 @@ function updateFMRList() {
         li.appendChild(imageList);
         ul.appendChild(li);
 
-        // Update FMR layer style
+        // 08/27: Restore expanded/collapsed state
+        if (expandedState[id]) {
+            imageList.classList.add("show");
+            const icon = header.querySelector(".toggle-icon");
+            icon.textContent = "▼";
+        }
+
         const layer = geoLayers["geoLayer_" + id];
         if (layer) layer.setStyle({color: "red", weight: 3.5});
     });
+}
+
+// 08/27: Enable/disable Run button dynamically
+function updateRunButtonState() {
+  const runBtn = document.getElementById("runBtn");
+  if (!runBtn) return;
+
+  // count selected checkboxes
+  const anySelected = document.querySelectorAll(".image-checkbox:checked").length > 0;
+  runBtn.disabled = !anySelected;
 }
 
 function toggleAllFMRs(expand) {
@@ -314,6 +371,7 @@ function clearSelections() {
         if (data.status === "cleared") {
             selectedIds.clear();
             updateRunButtonState();
+            updateClearButtonState();
             
             // Remove all overlays
             Object.keys(overlayLayers).forEach(key => {
@@ -475,6 +533,33 @@ function updateRunButtonState() {
     const runBtn = document.getElementById('runBtn');
     runBtn.disabled = selectedIds.size === 0;
 }
+
+// 08/27: Enable/disable Clear button depending on selected FMRs
+function updateClearButtonState() {
+    const clearBtn = document.getElementById("clearBtn");
+    if (selectedIds.size > 0) {
+        clearBtn.disabled = false;
+    } else {
+        clearBtn.disabled = true;
+    }
+}
+
+// 08/27: Collapsible main controls (hide/show instead of shrinking)
+document.addEventListener("DOMContentLoaded", () => {
+  const toggleBtn = document.getElementById("toggle-main-controls");
+  const mainControls = document.getElementById("selection-panel"); // target whole panel
+
+  if (toggleBtn && mainControls) {
+    toggleBtn.addEventListener("click", () => {
+      const isHidden = mainControls.style.display === "none";
+      mainControls.style.display = isHidden ? "block" : "none";
+      toggleBtn.title = isHidden ? "Hide Controls" : "Show Controls";
+    });
+
+    // start collapsed by default
+    mainControls.style.display = "none";
+  }
+});
 
 // Export functions for external use
 window.FMRUtils = {
