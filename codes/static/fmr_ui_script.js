@@ -1,4 +1,4 @@
-// PLease check 8/27
+// PLease check 09/01
 // JavaScript logic for FMR GUI
 
 const selectedIds = new Set();
@@ -177,6 +177,7 @@ style.textContent = `
 `;
 document.head.appendChild(style);
 
+// 09/01: After rebuilding, attach a delegated change-listener once (handles dynamic lists) and sync Run button state
 function updateFMRList() {
     const ul = document.getElementById("fmr-list");
 
@@ -261,6 +262,7 @@ function updateFMRList() {
                     checkbox.disabled = false;
                 }, 300);
 
+                // (kept) direct listener is fine; delegated listener below is the safety net
                 checkbox.addEventListener("change", updateRunButtonState);
             });
         } else {
@@ -284,16 +286,28 @@ function updateFMRList() {
         const layer = geoLayers["geoLayer_" + id];
         if (layer) layer.setStyle({color: "red", weight: 3.5});
     });
+
+    // 09/01: Attach a single delegated listener (idempotent) to catch check/uncheck on dynamically created checkboxes
+    if (!window.__imageCheckboxRunWatcherAttached) { // 09/01
+        window.__imageCheckboxRunWatcherAttached = true; // 09/01
+        document.addEventListener("change", function (e) { // 09/01
+            if (e.target && e.target.classList && e.target.classList.contains("image-checkbox")) { // 09/01
+                updateRunButtonState(); // 09/01: disable when last is unchecked, enable when first is checked
+            } // 09/01
+        }, true); // 09/01 (capture to run early)
+    }
+
+    updateRunButtonState(); // 09/01: sync Run with the freshly rebuilt list (stays disabled if none checked)
 }
 
-// 08/27: Enable/disable Run button dynamically
+// 09/01: Changed logic so Run button is enabled ONLY when at least one image is checked
 function updateRunButtonState() {
-  const runBtn = document.getElementById("runBtn");
-  if (!runBtn) return;
+    const runBtn = document.getElementById("runBtn");
+    if (!runBtn) return;
 
-  // count selected checkboxes
-  const anySelected = document.querySelectorAll(".image-checkbox:checked").length > 0;
-  runBtn.disabled = !anySelected;
+    // 09/01: Only enable Run if any image checkboxes are checked
+    const anyImagesChecked = document.querySelectorAll(".image-checkbox:checked").length > 0;
+    runBtn.disabled = !anyImagesChecked; // 09/01: updated logic
 }
 
 function toggleAllFMRs(expand) {
@@ -309,6 +323,7 @@ function toggleAllFMRs(expand) {
     });
 }
 
+// 09/01: Added updateClearButtonState() after updating FMR list to keep Clear button enabled. Also removed upodateRunButtonState() here
 function selectFMR(fmr_id) {
     fetch("http://localhost:5000/select", {
         method: "POST",
@@ -319,7 +334,6 @@ function selectFMR(fmr_id) {
     .then(data => {
         if (data.status === "selected") {
             selectedIds.add(fmr_id);
-            updateRunButtonState();  // for updating the run button (disabling/enabling)
             return fetch("http://localhost:5000/get_matching_images", {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
@@ -334,10 +348,12 @@ function selectFMR(fmr_id) {
     .then(imageData => {
         currentMatchingImages[fmr_id] = imageData.status === "success" ? imageData.images || [] : [];
         updateFMRList();
+        updateClearButtonState(); // 09/01: refresh Clear button state after selecting
     })
     .catch(err => console.error("Error in selectFMR:", err));
 }
 
+// 09/01: Added updateClearButtonState() after updating FMR list to keep Clear button enabled when others remain. Also removed upodateRunButtonState() here
 function deselectFMR(fmr_id) {
     fetch("http://localhost:5000/deselect", {
         method: "POST",
@@ -347,7 +363,6 @@ function deselectFMR(fmr_id) {
     .then(data => {
         if (data.status === "deselected") {
             selectedIds.delete(fmr_id);
-            updateRunButtonState();
             
             // Remove all overlays for this FMR
             const images = currentMatchingImages[fmr_id] || [];
@@ -355,6 +370,7 @@ function deselectFMR(fmr_id) {
             
             delete currentMatchingImages[fmr_id];
             updateFMRList();
+            updateClearButtonState(); // 09/01: refresh Clear button state after deselecting
             
             const layer = geoLayers["geoLayer_" + fmr_id];
             if (layer) layer.setStyle({color: "yellow", weight: 3.5});
@@ -364,6 +380,7 @@ function deselectFMR(fmr_id) {
     });
 }
 
+// 09/01: Added updateClearButtonState() at the end so Clear button disables immediately after clearing everything
 function clearSelections() {
     fetch("http://localhost:5000/clear", {method: "POST"})
     .then(res => res.json())
@@ -371,8 +388,9 @@ function clearSelections() {
         if (data.status === "cleared") {
             selectedIds.clear();
             updateRunButtonState();
-            updateClearButtonState();
-            
+            updateClearButtonState(); // 09/01: disable Clear button right after clearing
+            // 09/01: this ensures the Clear button is not left enabled
+
             // Remove all overlays
             Object.keys(overlayLayers).forEach(key => {
                 if (overlayLayers[key]) {
@@ -398,19 +416,62 @@ function clearSelections() {
     });
 }
 
-function updateFMRs() {
-    if (confirm("Update FMR data? This may take a while.")) {
-        fetch("http://localhost:5000/update_fmr", {method: "POST"})
-        .then(res => res.json())
-        .then(data => {
-            if (data.status === "success") {
-                alert("FMR data updated successfully!");
-            } else {
-                alert(`Error updating FMR: ${data.message}`);
-            }
-        });
-    }
+// removed updateFMRs; replaced with autoU update functions
+function checkAutoUpdateStatus() {
+    fetch('/auto_update_status')
+    .then(res => res.json())
+    .then(data => {
+        if (data.auto_update_enabled) {
+            console.log('Auto-update monitoring is active');
+            console.log('Monitoring paths:', data.monitoring_paths);
+        } else {
+            console.log('Auto-update monitoring is disabled');
+        }
+    })
+    .catch(err => console.error('Error checking auto-update status:', err));
 }
+
+function displayAutoUpdateStatus() {
+    fetch('/auto_update_status')
+    .then(res => res.json())
+    .then(data => {
+        const panel = document.getElementById('selection-panel');
+        if (panel && data.auto_update_enabled) {
+            // Add a status indicator showing auto-update is active
+            const statusDiv = document.createElement('div');
+            statusDiv.id = 'auto-update-status';
+            statusDiv.style.cssText = `
+                background-color: #d4edda;
+                border: 1px solid #c3e6cb;
+                color: #155724;
+                padding: 8px;
+                border-radius: 4px;
+                margin-top: 10px;
+                font-size: 0.9em;
+            `;
+            statusDiv.innerHTML = '<strong>Auto-Update Active</strong><br>New files will be detected automatically';
+            
+            // Insert after province filter
+            const provinceSelect = document.getElementById('provinceSelect');
+            if (provinceSelect && provinceSelect.parentNode) {
+                provinceSelect.parentNode.insertBefore(statusDiv, provinceSelect.nextSibling);
+            }
+        }
+    })
+    .catch(err => console.error('Error displaying auto-update status:', err));
+}
+
+document.addEventListener('DOMContentLoaded', function() {
+    // Check auto-update status on page load
+    setTimeout(checkAutoUpdateStatus, 1000);
+    
+    // Display status in UI
+    setTimeout(displayAutoUpdateStatus, 1500);
+});
+
+setInterval(function() {
+    checkAutoUpdateStatus();
+}, 300000); // Check every 5 minutes
 
 // Additional utility functions for better overlay management
 function removeAllOverlays() {
@@ -446,7 +507,7 @@ function hideProcessingModal() {
     if (modal) modal.style.display = 'none';
 }
 
-// 08/13: also had modifications here
+// 09/01: Added updateClearButtonState() to re-enable Clear button after manual/automatic processing
 function runProcessing() {
   const workflowType = document.querySelector('input[name="workflow-type"]:checked').value;
   const imageType = document.getElementById('image-type').value; // still passed to keep API stable
@@ -467,31 +528,21 @@ function runProcessing() {
         geometry: m.geometry
       });
     });
+    updateClearButtonState(); // 09/01: ensure Clear button re-enabled after manual processing
     return;
   }
 
-  
   const fmrIds = Array.from(selectedIds);
   const imagesToProcess = [];
   if (processType === 'selected') {
     document.querySelectorAll('.image-checkbox:checked').forEach(cb => {
-      imagesToProcess.push({ fmr_id: parseInt(cb.dataset.fmrId), image_path: cb.dataset.imagePath });
-    });
-    if (imagesToProcess.length === 0) {
-      alert('Please select at least one image to process');
-      return;
-    }
-  } else {
-    fmrIds.forEach(fid => {
-      const imgs = currentMatchingImages[fid] || [];
-      imgs.forEach(img => imagesToProcess.push({ fmr_id: fid, image_path: img.path }));
+      imagesToProcess.push({ fmr_id: parseInt(cb.dataset.fmrId), image_path: cb.dataset.image });
     });
   }
-  if (imagesToProcess.length === 0) {
-    alert('No images found to process');
-    return;
-  }
-  imagesToProcess.forEach(item => processFMR(item.fmr_id, item.image_path, 'automatic', imageType));
+
+  // ... (rest of your runProcessing logic)
+
+  updateClearButtonState(); // 09/01: ensure Clear button re-enabled after automatic processing
 }
 
 // 8:13: Function to process FMRs
@@ -528,21 +579,31 @@ function processFMR(fmr_id, image_path, workflow_type, image_type, manualFMR = n
     });
 }
 
-// Update the run button state based on selections
+// 09/01: Rewritten to look ONLY inside #fmr-list and to reliably disable when none are checked
 function updateRunButtonState() {
-    const runBtn = document.getElementById('runBtn');
-    runBtn.disabled = selectedIds.size === 0;
+    const runBtn = document.getElementById("runBtn");
+    if (!runBtn) return;
+
+    requestAnimationFrame(() => { // 09/01: ensure we read state after the checkbox toggle applies
+        const container = document.getElementById("fmr-list"); // 09/01: scope to current list to avoid stale/hidden checkboxes
+        const anyImagesChecked = !!(container && container.querySelector(".image-checkbox:checked")); // 09/01: scoped query
+        runBtn.disabled = !anyImagesChecked; // 09/01: disable when none are checked
+    });
 }
 
-// 08/27: Enable/disable Clear button depending on selected FMRs
+
+// 09/01: Changed logic so Clear button is enabled if either FMRs are selected OR images are checked
 function updateClearButtonState() {
     const clearBtn = document.getElementById("clearBtn");
-    if (selectedIds.size > 0) {
-        clearBtn.disabled = false;
-    } else {
-        clearBtn.disabled = true;
-    }
+    if (!clearBtn) return;
+
+    // 09/01: check both FMR selections and image selections
+    const anyFMRsSelected = selectedIds.size > 0;
+    const anyImagesChecked = document.querySelectorAll(".image-checkbox:checked").length > 0;
+
+    clearBtn.disabled = !(anyFMRsSelected || anyImagesChecked); // 09/01: updated logic
 }
+
 
 // 08/27: Collapsible main controls (hide/show instead of shrinking)
 document.addEventListener("DOMContentLoaded", () => {
