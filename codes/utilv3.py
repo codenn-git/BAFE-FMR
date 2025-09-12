@@ -2,11 +2,17 @@
 ## mostly on smoothing the centerline
 ## then creating a polygon from the calculate mean Width
 import rasterio
+import rasterio.transform
 from rasterio.plot import show
 from rasterio.mask import mask
 import geopandas as gpd
 import shapely
+from rasterio.features import shapes
+from shapely.geometry import LineString, Point
+from shapely.ops import linemerge
+from scipy.spatial.distance import cdist
 import skimage
+import skimage.morphology
 from sklearn.neighbors import NearestNeighbors
 import matplotlib.pyplot as plt
 import numpy as np
@@ -14,9 +20,11 @@ import os
 import math
 import mpl_interactions
 import cv2
-from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
-from PyQt5.QtWidgets import QSizePolicy
-from matplotlib.figure import Figure
+import shapely
+from scipy import ndimage
+from skimage.morphology import skeletonize, thin
+from skimage.measure import label
+
 
 class Preprocessing:
     '''Class for preprocessing the raster'''
@@ -493,7 +501,7 @@ class MeasureWidth:
         if self.clipped_transects is None:
             raise ValueError("Transects not measured. Run clip_transects() first.")
 
-        self.clipped_transects = self.clipped_transects[(self.clipped_transects["width"] >= 3.5) & (self.clipped_transects["width"] <= 7)]
+        self.clipped_transects = self.clipped_transects[(self.clipped_transects["width"] >= 3.5) & (self.clipped_transects["width"] <= 8)]
 
         return self.clipped_transects[['geometry', 'width']]
 
@@ -510,22 +518,6 @@ class MeasureWidth:
         self.filter_transects()
         return self.clipped_transects[['geometry', 'width']]
 
-    def generate_polygon(self):
-        transects = self.clipped_transects['geometry']
-        # Extract the endpoints of the transects
-        left_points = [transect.coords[0] for transect in transects]  # Start points
-        right_points = [transect.coords[1] for transect in transects]  # End points
-
-        # Create a Polygon by combining the left and right lines
-        polygon = shapely.geometry.Polygon(left_points + right_points[::-1])  # Reverse right points to close the polygon
-
-        gdf_polygon = gpd.GeoDataFrame({
-            'id': [1],  # Unique ID for the polygon
-            'geometry': [polygon],
-            'description': ['Polygon']  # Optional: Add description
-        })
-
-        return gdf_polygon
 
     def export(self, output_path, gdf=None):
          # Ensure the output folder exists
@@ -563,87 +555,393 @@ class MeasureWidth:
         ax.axis("off")
         
         return plt.show()
-    
 
-def measure_line(raster_data, transform, spacing=3, 
-                return_points=False, crs="EPSG:32651", road_width=None, 
-                return_polygon=False):
+class CenterlineExtractor:
     """
-    Create a continuous road centerline from left to right from binary raster.
-    Optionally create road polygon with specified width.
+    Extract and process centerlines from skeleton rasters.
+    """
+
+    def __init__(self, raster_array=None, transform=None, crs=None):
+        raster_array = skeletonize(raster_array)
+        self.raster = raster_array.astype(np.uint8)
+        self.transform = transform
+        self.crs = crs
+
+   
+    # PREPROCESSING #===========================================================================
+
+    def preprocess(self, ensure_binary=True, apply_thinning=True):
+        if ensure_binary:
+            self.raster = (self.raster > 0).astype(np.uint8)
+        if apply_thinning:
+            self.raster = thin(self.raster).astype(np.uint8)
+        return self.raster
+
+    # =============================================================================
+    # CENTERLINE EXTRACTION
+    # =============================================================================
+
+    def extract_centerlines(self, method='pixel_tracing'):
+        if method == 'pixel_tracing':
+            return self._extract_by_pixel_tracing()
+        elif method == 'vectorization':
+            return self._extract_by_vectorization()
+        elif method == 'endpoint_detection':
+            return self._extract_by_endpoints()
+        else:
+            raise ValueError("Method must be 'pixel_tracing', 'vectorization', or 'endpoint_detection'")
+
+    def _extract_by_pixel_tracing(self):
+        skeleton_pixels = np.where(self.raster > 0)
+        if len(skeleton_pixels[0]) == 0:
+            return gpd.GeoDataFrame(columns=['geometry'], crs=self.crs)
+
+        labeled = label(self.raster > 0, connectivity=2)
+        lines = []
+        for component_id in range(1, labeled.max() + 1):
+            component_mask = labeled == component_id
+            component_coords = np.where(component_mask)
+            if len(component_coords[0]) < 2:
+                continue
+            real_coords = []
+            for i in range(len(component_coords[0])):
+                row, col = component_coords[0][i], component_coords[1][i]
+                x, y = rasterio.transform.xy(self.transform, row, col)
+                real_coords.append((x, y))
+            if len(real_coords) >= 2:
+                sorted_coords = self._sort_coordinates(real_coords)
+                if len(sorted_coords) >= 2:
+                    lines.append(LineString(sorted_coords))
+        return gpd.GeoDataFrame(geometry=lines, crs=self.crs) if lines else gpd.GeoDataFrame(columns=['geometry'], crs=self.crs)
+
+    def _extract_by_vectorization(self):
+        mask = self.raster > 0
+        shapes_gen = shapes(self.raster.astype(np.int32), mask=mask, transform=self.transform)
+        geometries = [geom for geom, value in shapes_gen if value > 0]
+        return gpd.GeoDataFrame(geometry=geometries, crs=self.crs) if geometries else gpd.GeoDataFrame(columns=['geometry'], crs=self.crs)
+
+    def _extract_by_endpoints(self):
+        kernel = np.array([[1, 1, 1], [1, 10, 1], [1, 1, 1]])
+        skeleton_conv = ndimage.convolve(self.raster.astype(float), kernel, mode='constant')
+        labeled = label(self.raster > 0, connectivity=2)
+        lines = []
+        for component_id in range(1, labeled.max() + 1):
+            component_mask = labeled == component_id
+            component_coords = np.where(component_mask)
+            if len(component_coords[0]) >= 2:
+                real_coords = []
+                for i in range(len(component_coords[0])):
+                    row, col = component_coords[0][i], component_coords[1][i]
+                    x, y = rasterio.transform.xy(self.transform, row, col)
+                    real_coords.append((x, y))
+                if len(real_coords) >= 2:
+                    sorted_coords = self._sort_coordinates(real_coords)
+                    lines.append(LineString(sorted_coords))
+        return gpd.GeoDataFrame(geometry=lines, crs=self.crs) if lines else gpd.GeoDataFrame(columns=['geometry'], crs=self.crs)
+
+    def _sort_coordinates(self, coords):
+        if len(coords) <= 2:
+            return coords
+        points = [Point(x, y) for x, y in coords]
+        max_dist = 0
+        start_idx = 0
+        for i in range(len(points)):
+            for j in range(i + 1, len(points)):
+                dist = points[i].distance(points[j])
+                if dist > max_dist:
+                    max_dist = dist
+                    start_idx = i
+        start_point = points[start_idx]
+        sorted_indices = sorted(range(len(points)), key=lambda i: start_point.distance(points[i]))
+        return [coords[i] for i in sorted_indices]
+
+    # =============================================================================
+    # LINE CONNECTION
+    # =============================================================================
+
+    def connect_lines(self, gdf, tolerance=10.0, method='nearest'):
+        if len(gdf) <= 1:
+            return gdf
+        lines = list(gdf.geometry)
+        if method == 'nearest':
+            connected = self._connect_nearest(lines, tolerance)
+        elif method == 'sequential':
+            connected = self._connect_sequential(lines)
+        elif method == 'mst':
+            connected = self._connect_mst(lines, tolerance)
+        else:
+            raise ValueError("Method must be 'nearest', 'sequential', or 'mst'")
+        if connected:
+            return gpd.GeoDataFrame(geometry=[connected], crs=gdf.crs)
+        else:
+            return gdf
+
+    def _connect_nearest(self, lines, tolerance):
+        if not lines:
+            return None
+        connected_coords = list(lines[0].coords)
+        remaining_lines = lines[1:]
+        while remaining_lines:
+            current_end = Point(connected_coords[-1])
+            best_line = None
+            best_distance = float('inf')
+            best_idx = -1
+            best_reverse = False
+            for i, line in enumerate(remaining_lines):
+                line_start = Point(line.coords[0])
+                line_end = Point(line.coords[-1])
+                dist_to_start = current_end.distance(line_start)
+                dist_to_end = current_end.distance(line_end)
+                if dist_to_start < best_distance:
+                    best_distance = dist_to_start
+                    best_line = line
+                    best_idx = i
+                    best_reverse = False
+                if dist_to_end < best_distance:
+                    best_distance = dist_to_end
+                    best_line = line
+                    best_idx = i
+                    best_reverse = True
+            if best_line and (best_distance <= tolerance or len(remaining_lines) == len(lines) - 1):
+                line_coords = list(best_line.coords)
+                if best_reverse:
+                    line_coords = line_coords[::-1]
+                if best_distance > 0:
+                    connected_coords.append(line_coords[0])
+                connected_coords.extend(line_coords)
+                remaining_lines.pop(best_idx)
+            else:
+                break
+        return LineString(connected_coords) if len(connected_coords) >= 2 else None
+
+    def _connect_sequential(self, lines):
+        if not lines:
+            return None
+        connected_coords = list(lines[0].coords)
+        for line in lines[1:]:
+            line_coords = list(line.coords)
+            current_end = Point(connected_coords[-1])
+            if current_end.distance(Point(line_coords[-1])) < current_end.distance(Point(line_coords[0])):
+                line_coords = line_coords[::-1]
+            connected_coords.extend(line_coords)
+        return LineString(connected_coords)
+
+    def _connect_mst(self, lines, tolerance):
+        """Connect lines using a true Minimum Spanning Tree approach"""
+        if not lines:
+            return None
+
+        # Build list of endpoints
+        endpoints = []
+        for idx, line in enumerate(lines):
+            endpoints.append((idx, 0, Point(line.coords[0])))  # start point
+            endpoints.append((idx, 1, Point(line.coords[-1]))) # end point
+
+        # Build full distance matrix between endpoints
+        n = len(endpoints)
+        dist_matrix = np.full((n, n), np.inf)
+        for i in range(n):
+            for j in range(i + 1, n):
+                if endpoints[i][0] != endpoints[j][0]:  # don't connect endpoints of same line
+                    d = endpoints[i][2].distance(endpoints[j][2])
+                    dist_matrix[i, j] = d
+                    dist_matrix[j, i] = d
+
+        try:
+            from scipy.sparse.csgraph import minimum_spanning_tree
+            mst = minimum_spanning_tree(dist_matrix)
+            mst = mst.toarray()
+        except ImportError:
+            return self._connect_nearest(lines, tolerance)
+
+        # Find pairs to connect based on MST edges below tolerance
+        connections = []
+        for i in range(n):
+            for j in range(n):
+                if mst[i, j] != 0 and mst[i, j] <= tolerance:
+                    connections.append((i, j))
+
+        # Build connected coordinates following MST edges
+        used = [False] * len(lines)
+        connected_coords = []
+
+        for idx, line in enumerate(lines):
+            if not used[idx]:
+                coords = list(line.coords)
+                used[idx] = True
+                # Find edges connected to this line and append coordinates
+                for (i, j) in connections:
+                    li, si, pi = endpoints[i]
+                    lj, sj, pj = endpoints[j]
+                    if li == idx or lj == idx:
+                        other_idx = lj if li == idx else li
+                        if not used[other_idx]:
+                            other_line = lines[other_idx]
+                            other_coords = list(other_line.coords)
+                            if sj == 1:
+                                other_coords = other_coords[::-1]  # flip if needed
+                            coords.extend(other_coords)
+                            used[other_idx] = True
+                connected_coords.extend(coords)
+
+        return LineString(connected_coords) if len(connected_coords) >= 2 else None
+
+    # =============================================================================
+    # SMOOTHING
+    # =============================================================================
+
+    def smooth_lines(self, gdf, method='spline', **kwargs):
+        if len(gdf) == 0:
+            return gdf
+        smoothed_geometries = []
+        for geom in gdf.geometry:
+            if method == 'spline':
+                smoothed = self._smooth_spline(geom, **kwargs)
+            elif method == 'douglas_peucker':
+                smoothed = self._smooth_douglas_peucker(geom, **kwargs)
+            elif method == 'moving_average':
+                smoothed = self._smooth_moving_average(geom, **kwargs)
+            elif method == 'gaussian':
+                smoothed = self._smooth_gaussian(geom, **kwargs)
+            else:
+                raise ValueError("Unsupported smoothing method")
+            if smoothed:
+                smoothed_geometries.append(smoothed)
+        return gpd.GeoDataFrame(geometry=smoothed_geometries, crs=gdf.crs) if smoothed_geometries else gdf
+
+    def _smooth_spline(self, line, smoothing_factor=0.1, num_points=None):
+        try:
+            from scipy.interpolate import splprep, splev
+        except ImportError:
+            return self._smooth_douglas_peucker(line, tolerance=1.0)
+        coords = np.array(line.coords)
+        if len(coords) < 4:
+            return line
+        unique_coords = []
+        for coord in coords:
+            if not unique_coords or not np.allclose(coord, unique_coords[-1], atol=1e-10):
+                unique_coords.append(coord)
+        if len(unique_coords) < 4:
+            return line
+        unique_coords = np.array(unique_coords)
+        x, y = unique_coords[:, 0], unique_coords[:, 1]
+        try:
+            tck, u = splprep([x, y], s=smoothing_factor * len(x), k=min(3, len(x) - 1))
+            if num_points is None:
+                num_points = max(len(coords), 100)
+            u_new = np.linspace(0, 1, num_points)
+            smooth_coords = splev(u_new, tck)
+            return LineString(list(zip(smooth_coords[0], smooth_coords[1])))
+        except:
+            return line
+
+    def _smooth_douglas_peucker(self, line, tolerance=1.0):
+        return line.simplify(tolerance, preserve_topology=True)
+
+    def _smooth_moving_average(self, line, window_size=5):
+        coords = np.array(line.coords)
+        if len(coords) <= window_size:
+            return line
+        smoothed_coords = []
+        for i in range(len(coords)):
+            start_idx = max(0, i - window_size // 2)
+            end_idx = min(len(coords), i + window_size // 2 + 1)
+            window_coords = coords[start_idx:end_idx]
+            avg_coord = np.mean(window_coords, axis=0)
+            smoothed_coords.append(avg_coord)
+        return LineString(smoothed_coords)
+        coords = list(line.coords)
+        for _ in range(iterations):
+            if len(coords) < 3:
+                break
+            new_coords = [coords[0]]
+            for i in range(len(coords) - 1):
+                p1, p2 = np.array(coords[i]), np.array(coords[i + 1])
+                q1 = p1 + 0.25 * (p2 - p1)
+                q2 = p1 + 0.75 * (p2 - p1)
+                new_coords.extend([q1, q2])
+            new_coords.append(coords[-1])
+            coords = new_coords
+        return LineString(coords)
+
+    def _smooth_gaussian(self, line, sigma=1.0):
+        try:
+            from scipy.ndimage import gaussian_filter1d
+        except ImportError:
+            return self._smooth_moving_average(line, window_size=5)
+        coords = np.array(line.coords)
+        if len(coords) < 3:
+            return line
+        x_smooth = gaussian_filter1d(coords[:, 0], sigma=sigma, mode='nearest')
+        y_smooth = gaussian_filter1d(coords[:, 1], sigma=sigma, mode='nearest')
+        return LineString(list(zip(x_smooth, y_smooth)))
+
+    # =============================================================================
+    # UTILITY METHODS
+    # =============================================================================
+
+    def clean_lines(self, gdf):
+        if len(gdf) == 0:
+            return gdf
+        merged_lines = linemerge(list(gdf.geometry))
+        if hasattr(merged_lines, 'geoms'):
+            geometries = list(merged_lines.geoms)
+        else:
+            geometries = [merged_lines]
+        return gpd.GeoDataFrame(geometry=geometries, crs=gdf.crs)
+
+    def visualize(self, *gdfs, titles=None, figsize=(15, 5)):
+        n_plots = len(gdfs) + 1
+        fig, axes = plt.subplots(1, n_plots, figsize=figsize)
+        if n_plots == 1:
+            axes = [axes]
+        axes[0].imshow(self.raster, cmap='gray')
+        axes[0].set_title('Original Skeleton')
+        axes[0].set_xlabel('Column')
+        axes[0].set_ylabel('Row')
+        colors = ['red', 'blue', 'green', 'orange', 'purple']
+        for i, gdf in enumerate(gdfs):
+            ax_idx = i + 1
+            if len(gdf) > 0:
+                gdf.plot(ax=axes[ax_idx], color=colors[i % len(colors)], linewidth=2)
+            title = titles[i] if titles and i < len(titles) else f'Result {i+1}'
+            axes[ax_idx].set_title(title)
+            axes[ax_idx].grid(True, alpha=0.3)
+            axes[ax_idx].set_xlabel('X Coordinate')
+            axes[ax_idx].set_ylabel('Y Coordinate')
+        plt.tight_layout()
+        plt.show()
+
+    def process_skeleton(self, extract_method='pixel_tracing', connect_lines=True, connection_tolerance=10.0, smooth_method=None, smooth_params=None):
+        
+        self.preprocess()
+        
+        centerlines = self.extract_centerlines(method=extract_method)
+        centerlines = self.clean_lines(centerlines)
+        
+        if connect_lines and len(centerlines) > 1:
+            connected = self.connect_lines(centerlines, tolerance=connection_tolerance)
+        else:
+            connected = centerlines
+        
+        result = connected
+        if smooth_method:
+            smooth_params = smooth_params or {}
+            result = self.smooth_lines(result, method=smooth_method, **smooth_params)
+
+def create_polygon(line_gdf, road_width):
+    """
+    Buffer connected lines to create road polygons.
     
     Parameters:
-    - raster_data: 2D numpy array (1=road, 0=non-road)
-    - transform: affine transform from original raster
-    - spacing: sample every N pixels (default=3)
-    - return_points: if True, returns both points and line
-    - crs: coordinate reference system
-    - road_width: width of road in map units (e.g., meters). If None, only returns centerline
-    - return_polygon: if True and road_width is specified, returns polygon instead of line
+    - line_gdf: GeoDataFrame containing connected LineStrings
+    - road_width: width of the road in map units (e.g. meters)
     
     Returns:
-    - GeoDataFrame with centerline or road polygon (and optionally points)
+    - GeoDataFrame containing buffered polygons
     """
-    skeleton = skimage.morphology.skeletonize(raster_data)
-    y_coords, x_coords = np.where(skeleton)
-    x_coords = x_coords[::spacing]
-    y_coords = y_coords[::spacing]
-    
-    # Convert to real-world coordinates
-    xx, yy = rasterio.transform.xy(transform, y_coords, x_coords)
-    points = [shapely.geometry.Point(x, y) for x, y in zip(xx, yy)]
-    points_gdf = gpd.GeoDataFrame(
-        geometry=points,
-        data={'pixel_x': x_coords, 'pixel_y': y_coords},
-        crs=crs
-    )
-    
-    coords = np.array([[p.x, p.y] for p in points_gdf.geometry])
-    sorted_idx = np.argsort(coords[:, 0])
-    sorted_coords = coords[sorted_idx]
-    
-    path = []
-    remaining_points = sorted_coords.copy()
-    current_point = remaining_points[0]
-    path.append(current_point)
-    remaining_points = np.delete(remaining_points, 0, axis=0)
-    
-    while len(remaining_points) > 0:
-        nbrs = NearestNeighbors(n_neighbors=1).fit(remaining_points)
-        distances, indices = nbrs.kneighbors([current_point])
-        next_point = remaining_points[indices[0][0]]
-        path.append(next_point)
-        current_point = next_point
-        remaining_points = np.delete(remaining_points, indices[0][0], axis=0)
-    
-    line = shapely.geometry.LineString(path)
-    
-    if road_width is not None:
-        # Buffer the line to create a polygon with specified width
-        road_polygon = line.buffer(road_width / 2, cap_style=1, join_style=1)
-        
-        if return_polygon:
-            # Return polygon instead of line
-            result_gdf = gpd.GeoDataFrame(geometry=[road_polygon], crs=points_gdf.crs)
-        else:
-            # Return both line and polygon
-            line_gdf = gpd.GeoDataFrame(geometry=[line], crs=points_gdf.crs)
-            polygon_gdf = gpd.GeoDataFrame(geometry=[road_polygon], crs=points_gdf.crs)
-            result_gdf = line_gdf  # Default return is still the line
-    else:
-        # Original behavior - return line only
-        result_gdf = gpd.GeoDataFrame(geometry=[line], crs=points_gdf.crs)
-    
-    # Return based on parameters
-    if return_points and road_width is not None and not return_polygon:
-        return (result_gdf, points_gdf, polygon_gdf)
-    elif return_points:
-        return (result_gdf, points_gdf)
-    elif road_width is not None and return_polygon:
-        return gpd.GeoDataFrame(geometry=[road_polygon], crs=points_gdf.crs)
-    else:
-        return result_gdf
-
+    buffered_polygons = line_gdf.geometry.buffer(road_width / 2, cap_style=1, join_style=1)
+    return gpd.GeoDataFrame(geometry=buffered_polygons, crs=line_gdf.crs)
 
 def stretch_band(band, lower_percent=2, upper_percent=98):
     ''' 
@@ -705,119 +1003,9 @@ def export(obj, output_path, obj_type, crs, raster_transform=None):
     if obj_type == 'vector':
         # For vector objects
         if isinstance(obj, gpd.GeoDataFrame):
-            obj.to_file(output_path, driver='ESRI Shapefile')
+            obj.to_file(output_path, driver='GeoJSON')
         else:
             raise ValueError("obj must be a GeoDataFrame for vector export.")
 
         print(f"Vector exported successfully to {output_path}")
         return
-    
-class Interaction:
-    def __init__(self, img, vector_path):
-        self.vector_data = gpd.read_file(vector_path).to_crs("EPSG:32651")
-        self.img_orig = np.moveaxis(img, 0, -1)  # Move the first axis to the last position
-        self.line_points = []
-        self.press_event = {'x': None, 'y': None}
-        self.drag_threshold = 5
-
-        self.fig, self.ax = plt.subplots(figsize=(10, 8))
-        self.ax.imshow(self.img_orig)
-        self.ax.set_title("Left-click to draw, Right-click to undo, Middle-click to reset, Enter to finish.")
-        self.ax.axis("off")
-
-        self.bind_events()
-
-    def bind_events(self):
-        self.fig.canvas.mpl_connect('button_press_event', self.onpress)
-        self.fig.canvas.mpl_connect('button_release_event', self.onrelease)
-        self.fig.canvas.mpl_connect('key_press_event', self.onkey)
-
-        mpl_interactions.zoom_factory(self.ax)
-        mpl_interactions.panhandler(self.fig)
-
-    def redraw(self):
-        xlim = self.ax.get_xlim()
-        ylim = self.ax.get_ylim()  
-
-        self.ax.clear()
-        self.ax.imshow(self.img_orig)
-        self.ax.set_title("Left-click to draw, Right-click to undo, Middle-click to reset, Enter to finish.")
-        self.ax.axis("off")
-
-        if self.line_points:
-            x_vals, y_vals = zip(*self.line_points)
-            self.ax.plot(x_vals, y_vals, 'g-', linewidth=2)
-            self.ax.plot(x_vals, y_vals, 'ro', markersize=4)
-
-        self.ax.set_xlim(xlim)
-        self.ax.set_ylim(ylim)
-
-        self.fig.canvas.draw()
-
-    def onpress(self, event):
-        if event.button == 1 and event.inaxes:
-            self.press_event['x'] = event.x
-            self.press_event['y'] = event.y
-
-    def onrelease(self, event):
-        if not event.inaxes:
-            return
-
-        if event.button == 1:
-            dx = abs(event.x - self.press_event['x'])
-            dy = abs(event.y - self.press_event['y'])
-            if dx < self.drag_threshold and dy < self.drag_threshold:
-                # Treat as a left-click
-                x, y = event.xdata, event.ydata
-                self.line_points.append((x, y))
-                self.redraw()
-
-        elif event.button == 3:
-            # Right-click: delete last point
-            if self.line_points:
-                self.line_points.pop()
-                self.redraw()
-
-        elif event.button == 2:
-            # Middle-click: reset all
-            self.line_points.clear()
-            self.redraw()
-
-    def onkey(self, event):
-        if event.key == 'enter' and len(self.line_points) >= 2:
-            x_vals, y_vals = zip(*self.line_points)
-            total_length = sum(math.hypot(x1 - x0, y1 - y0)
-                            for (x0, y0), (x1, y1) in zip(self.line_points[:-1], self.line_points[1:]))
-            
-            vector_length = self.vector_data.length.sum()
-            
-            mid_x = sum(x_vals) / len(x_vals)
-            mid_y = sum(y_vals) / len(y_vals)
-            self.ax.text(mid_x, mid_y, f"Length: {total_length:.2f} meters",
-                    color='blue', fontsize=12, bbox=dict(facecolor='white', alpha=0.7))
-            
-            progress = (total_length / vector_length) * 100
-            print(f"Progress: {progress:.2f}%")
-
-            self.ax.legend([f"FMR progress: {progress:.2f}%"], loc='lower center', fontsize=12, frameon=True)
-
-            self.fig.canvas.draw()
-
-        elif event.key == 'backspace':
-            if self.line_points:
-                self.line_points.pop()
-                self.redraw()
-
-    def show(self):
-        plt.show()
-
-    def export_line(self, output_path):
-        if not self.line_points:
-            raise ValueError("No line points to save.")
-        
-        line_geom = [shapely.geometry.LineString(self.line_points)]
-        gdf = gpd.GeoDataFrame(geometry=line_geom, crs="EPSG:32651")
-        
-        # Save to file
-        gdf.to_file(output_path, driver='ESRI Shapefile')
-        print(f"Line saved to {output_path}")
