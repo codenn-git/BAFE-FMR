@@ -1,4 +1,4 @@
-# please check 8/27
+# please check 09/18 for the differentiation of existing roads to FMRs
 
 import sys
 import os
@@ -28,15 +28,21 @@ from flask_cors import CORS
 from waitress import serve
 from io import BytesIO
 
+## auto-updates mechanism for database
+from watchdog.observers import Observer
+from watchdog.events import FileSystemEventHandler
+from fmr_file_monitor import FMRFileMonitor, AutoUpdater
+
 from utilv2 import Preprocessing, Filters, Morph, MeasureWidth, measure_line, Interaction, export
 
 import matplotlib
 matplotlib.use("Agg")
 # ==========================================================
 # Paths
-shapefile_path = r"C:\Users\user-307E123400\OneDrive - Philippine Space Agency\SDMAD_SHARED\PROJECTS\SAKA\FMR\GUI\Master FMR\NE_master_fmr.shp"
-bsg_folder = r"C:\Users\user-307E123400\OneDrive - Philippine Space Agency\SDMAD_SHARED\PROJECTS\SAKA\FMR\GUI\Raster images"
+shapefile_path = r"C:\Users\user-307E4B3400\OneDrive - Philippine Space Agency\SDMAD_SHARED\PROJECTS\SAKA\FMR\GUI\Master FMR\NE_master_fmr.shp"
+bsg_folder = r"C:\Users\user-307E4B3400\OneDrive - Philippine Space Agency\SDMAD_SHARED\PROJECTS\SAKA\FMR\GUI\Raster images"
 
+auto_updater = None #08/29: stores the updater
 # ==========================================================
 # Flask Setup
 app = Flask(__name__)
@@ -50,7 +56,7 @@ filtered_gdf = gdf.copy()
 
 # ==========================================================
 # Processing Functions
-# not yet finished, care of aina
+# not yet finished (Manual, Automatic working with bugs)
 
 # 07/31: edited for consistency with changes in runProcessing and processFMR
 # Fixed version of the process_fmr function with better database update logic
@@ -65,7 +71,7 @@ def process_fmr():
     image_path = data.get("image_path")
     manual_fmr = data.get("manual_fmr")  # For manual workflow
     
-    fmr_db_file = os.path.join(os.path.dirname(shapefile_path), "fmr_database.csv")
+    fmr_db_file = os.path.join(os.path.dirname(shapefile_path), "fmr_database_aina.csv")
 
     global selected_features, gdf
 
@@ -134,7 +140,7 @@ def process_fmr():
                     status = "On-going"
 
             # Load DB
-            fmr_db_file = os.path.join(os.path.dirname(shapefile_path), "fmr_database.csv")
+            fmr_db_file = os.path.join(os.path.dirname(shapefile_path), "fmr_database_aina.csv")
             if not os.path.exists(fmr_db_file):
                 return jsonify({"status": "error", "message": "FMR database not found"}), 404
 
@@ -447,6 +453,9 @@ def processing(vector_gdf, raster_path, image_type):
 # Original Flask Routes
 # ==========================================================
 
+# 09/18: Modified getDatabase
+# - Existing Infrastructures are named using RD_NAME (e.g., "Existing Bridge or Existing Concrete")
+# - Added "Year Completed" column (from YEAR_COM in shapefile)
 def getDatabase():
     """Efficiently scan FMR and BSG images, log all raster-FMR matches (1 row per match),
     sorted numerically by FMR index and date. Skips entries that are already in the database.
@@ -456,10 +465,20 @@ def getDatabase():
 
     master_fmr = shapefile_path
     bsg_folder_path = bsg_folder
-    fmr_db_file = os.path.join(os.path.dirname(master_fmr), "fmr_database.csv")
+    fmr_db_file = os.path.join(os.path.dirname(master_fmr), "fmr_database_migo.csv")  # 09/18
 
     # Load FMRs in EPSG:32651
     fmr_gdf = gpd.read_file(master_fmr).to_crs("EPSG:32651")
+
+    # 09/18: Mark rows where RD_NAME starts with "Existing"
+    if "RD_NAME" in fmr_gdf.columns:
+        fmr_gdf["IsExisting"] = fmr_gdf["RD_NAME"].astype(str).str.strip().str.lower().str.startswith("existing")
+    else:
+        fmr_gdf["IsExisting"] = False
+
+    # 09/18: Ensure YEAR_COM exists
+    if "YEAR_COM" not in fmr_gdf.columns:
+        fmr_gdf["YEAR_COM"] = None
 
     # Transformer from EPSG:4326 (raster bounds) to EPSG:32651 (FMR geometries)
     raster_to_fmr_crs = Transformer.from_crs("EPSG:4326", "EPSG:32651", always_xy=True)
@@ -474,7 +493,7 @@ def getDatabase():
         existing_df = pd.DataFrame()
         existing_keys = set()
 
-    # === Part 1: Preload raster bounds and reproject to EPSG:32651 ===
+    # === Part 1: Preload raster bounds ===
     raster_bounds_dict = {}
     for tif_file in os.listdir(bsg_folder_path):
         if not tif_file.endswith("Tiff.tif"):
@@ -496,11 +515,19 @@ def getDatabase():
 
     # === Part 2: For each FMR, log all raster matches ===
     results = []
+    fmr_counter = 0
+
     for idx, row in fmr_gdf.iterrows():
-        fmr_name = str(row.get("name", f"FMR-{idx}"))
+        if row.get("IsExisting", False):
+            fmr_name = str(row.get("RD_NAME", f"Existing-{idx}"))
+        else:
+            fmr_name = f"FMR-{fmr_counter}"
+            fmr_counter += 1
+
+        year_completed = row.get("YEAR_COM", "")
+
         fmr_geom = row.geometry
         planned_length = fmr_geom.length
-
         matched = False
 
         for tif_file, data in raster_bounds_dict.items():
@@ -508,36 +535,25 @@ def getDatabase():
 
             try:
                 with rasterio.open(tif_path) as src:
-                    # Quick reject: if no bbox intersection
                     if not fmr_geom.intersects(data["bounds_geom"]):
                         continue
-
-                    # 08/27 no data pixel check: reproject FMR into raster CRS
                     geom_proj = gpd.GeoSeries([fmr_geom], crs=fmr_gdf.crs).to_crs(src.crs)
                     fmr_line = geom_proj.iloc[0]
-
-                    # 08/27 no data pixel check: densify line into points
-                    N = 10  # meters between sample points
+                    N = 10
                     num_segments = max(2, int(fmr_line.length / N))
                     sample_points = [
                         fmr_line.interpolate(dist) 
                         for dist in np.linspace(0, fmr_line.length, num_segments)
                     ]
                     coords = [(pt.x, pt.y) for pt in sample_points]
-
-                    # Sample raster at those coordinates
                     values = list(src.sample(coords))
-
-                    # Reject if any point lies on nodata
                     nodata_val = src.nodata if src.nodata is not None else 0
                     if any(val[0] == nodata_val or val[0] == 0 for val in values):
                         continue
-
             except Exception as e:
                 print(f"Error validating {tif_file} with FMR {fmr_name}: {e}")
                 continue
 
-            # If we reach here → real image fully covers the FMR
             matched = True
             match = re.search(r"(\d{8})-(\d{6})", tif_file)
             if match:
@@ -551,12 +567,12 @@ def getDatabase():
             else:
                 formatted_date, formatted_time = "", ""
 
-            # Skip duplicates before appending
             if (fmr_name, tif_file, formatted_date) in existing_keys:
                 continue
 
             results.append({
                 "FMR": fmr_name,
+                "Year Completed": year_completed,   # 09/18
                 "BSG": tif_file,
                 "Date": formatted_date,
                 "Time": formatted_time,
@@ -570,40 +586,39 @@ def getDatabase():
             })
 
         if not matched:
-            # Check if this FMR already exists in DB with BSG=None
-            already_exists_blank = any(
-                (fmr_name == existing_fmr and pd.isna(existing_bsg))
-                for existing_fmr, existing_bsg, _ in existing_keys
-            )
-            if not already_exists_blank:
-                results.append({
-                    "FMR": fmr_name,
-                    "BSG": None,
-                    "Date": None,
-                    "Time": None,
-                    "Planned FMR Length": planned_length,
-                    "Current FMR Length": "",
-                    "FMR Progress": "",
-                    "FMR Status": "",
-                    "Mean FMR Width": "",
-                    "Processing Type": "",
-                    "Image Path": ""
-                })
+            results.append({
+                "FMR": fmr_name,
+                "Year Completed": year_completed,   # 09/18
+                "BSG": None,
+                "Date": None,
+                "Time": None,
+                "Planned FMR Length": planned_length,
+                "Current FMR Length": "",
+                "FMR Progress": "",
+                "FMR Status": "",
+                "Mean FMR Width": "",
+                "Processing Type": "",
+                "Image Path": ""
+            })
 
-    # === Part 3: Create DataFrame and sort ===
+    # === Part 3: Save results ===
     results_df = pd.DataFrame(results)
 
-    if results_df.empty:
+    if results_df.empty and not os.path.exists(fmr_db_file):
+        cols = ["FMR","Year Completed","BSG","Date","Time","Planned FMR Length",
+                "Current FMR Length","FMR Progress","FMR Status",
+                "Mean FMR Width","Processing Type","Image Path"]
+        pd.DataFrame(columns=cols).to_csv(fmr_db_file, index=False)
+        print(f"Created empty FMR database at {fmr_db_file}")
+        return
+    elif results_df.empty:
         print("No new FMR/BSG matches found. Skipping database update.")
         return
 
-    # Extract numeric index from FMR names (e.g., FMR_0, FMR_10 → 0, 10)
-    results_df["FMR_INDEX"] = results_df["FMR"].str.extract(r"(\d+)", expand=False).astype(int)
-
-    # Ensure 'Date' is datetime for proper sorting
+    results_df["FMR_INDEX"] = results_df["FMR"].str.extract(r"(\d+)", expand=False)
+    results_df["FMR_INDEX"] = results_df["FMR_INDEX"].astype(float).fillna(-1).astype(int)
     results_df["Date"] = pd.to_datetime(results_df["Date"], errors="coerce")
 
-    # === Part 4: Append and sort ===
     if not existing_df.empty:
         if "Processing Type" not in existing_df.columns:
             existing_df["Processing Type"] = ""
@@ -611,22 +626,29 @@ def getDatabase():
     else:
         final_df = results_df
 
-    final_df["FMR_INDEX"] = final_df["FMR"].str.extract(r"(\d+)", expand=False).astype(int)
+    final_df["FMR_INDEX"] = final_df["FMR"].str.extract(r"(\d+)", expand=False)
+    final_df["FMR_INDEX"] = final_df["FMR_INDEX"].astype(float).fillna(-1).astype(int)
     final_df["Date"] = pd.to_datetime(final_df["Date"], errors="coerce")
     final_df = final_df.sort_values(by=["FMR_INDEX", "Date"])
     final_df = final_df.drop(columns=["FMR_INDEX"])
 
     final_df.to_csv(fmr_db_file, index=False)
     print(f"Done! FMR database saved to:\n{fmr_db_file}")
+
+## ================= 08/29: UPDATING DATABASE FUNCTIONS =============== ##
     
 def updateFMRs(master_path):
-    """Merge other FMR shapefiles into the master FMR shapefile."""
+    """Merge other FMR shapefiles into the master FMR shapefile with data type cleaning."""
     master_dir = os.path.dirname(master_path)
     master_name = os.path.splitext(os.path.basename(master_path))[0]
 
     master_gdf = gpd.read_file(master_path)
     master_crs = master_gdf.crs
     gdfs_to_merge = []
+    
+    # Clean the master GDF first
+    master_gdf = clean_gdf_for_shapefile(master_gdf)
+    
     for file in os.listdir(master_dir):
         if file.endswith('.shp'):
             base_name = os.path.splitext(file)[0]
@@ -636,16 +658,33 @@ def updateFMRs(master_path):
                     gdf = gpd.read_file(file_path)
                     if gdf.crs != master_crs:
                         gdf = gdf.to_crs(master_crs)
+                    
+                    # Clean the GDF before merging
+                    gdf = clean_gdf_for_shapefile(gdf)
                     gdfs_to_merge.append(gdf)
                 except Exception as e:
                     print(f"Could not read {file_path}: {e}")
 
     if gdfs_to_merge:
         merged_gdf = pd.concat([master_gdf] + gdfs_to_merge, ignore_index=True)
-        merged_gdf.to_file(master_path)
+        # Clean the merged GDF as well
+        merged_gdf = clean_gdf_for_shapefile(merged_gdf)
     else:
         merged_gdf = master_gdf
 
+    try:
+        merged_gdf.to_file(master_path)
+        print(f"Successfully updated master shapefile: {master_path}")
+    except Exception as e:
+        print(f"Error writing shapefile: {e}")
+        # Try with a more restrictive schema
+        try:
+            write_shapefile_with_schema(merged_gdf, master_path)
+        except Exception as e2:
+            print(f"Failed to write with custom schema: {e2}")
+            raise e2
+
+    # Move processed files to merged folder
     merged_folder = os.path.join(master_dir, "merged")
     os.makedirs(merged_folder, exist_ok=True)
 
@@ -654,7 +693,222 @@ def updateFMRs(master_path):
         if base_name != master_name and ext.lower() in ['.shp', '.shx', '.dbf', '.prj', '.cpg', '.qix']:
             full_file = os.path.join(master_dir, file)
             if os.path.isfile(full_file):
-                shutil.move(full_file, os.path.join(merged_folder, file))
+                try:
+                    shutil.move(full_file, os.path.join(merged_folder, file))
+                except Exception as e:
+                    print(f"Warning: Could not move {file}: {e}")
+
+def clean_gdf_for_shapefile(gdf):
+    """Clean GeoDataFrame to ensure compatibility with shapefile format."""
+    # Create a copy to avoid modifying the original
+    cleaned_gdf = gdf.copy()
+    
+    for column in cleaned_gdf.columns:
+        if column == 'geometry':
+            continue
+            
+        col_data = cleaned_gdf[column]
+        
+        # Check if column contains bytes objects
+        if col_data.dtype == object:
+            # Check if any values are bytes
+            has_bytes = any(isinstance(val, bytes) for val in col_data.dropna())
+            if has_bytes:
+                print(f"Converting bytes column '{column}' to string")
+                # Convert bytes to string, handle NaN values
+                cleaned_gdf[column] = col_data.apply(
+                    lambda x: x.decode('utf-8', errors='ignore') if isinstance(x, bytes) 
+                    else str(x) if pd.notna(x) else None
+                )
+        
+        # Handle other problematic data types
+        elif col_data.dtype.name.startswith('datetime'):
+            # Convert datetime to string for shapefile compatibility
+            print(f"Converting datetime column '{column}' to string")
+            cleaned_gdf[column] = col_data.dt.strftime('%Y-%m-%d %H:%M:%S')
+            
+        elif col_data.dtype.name in ['complex64', 'complex128']:
+            # Convert complex numbers to string
+            print(f"Converting complex column '{column}' to string")
+            cleaned_gdf[column] = col_data.astype(str)
+            
+        # Ensure string columns don't exceed shapefile field width limits
+        if cleaned_gdf[column].dtype == object:
+            # Check for overly long strings and truncate if necessary
+            max_length = 254  # DBF field limit
+            if cleaned_gdf[column].astype(str).str.len().max() > max_length:
+                print(f"Truncating long strings in column '{column}' to {max_length} characters")
+                cleaned_gdf[column] = cleaned_gdf[column].astype(str).str.slice(0, max_length)
+    
+    return cleaned_gdf
+
+def write_shapefile_with_schema(gdf, output_path):
+    """Write shapefile with explicitly defined schema to avoid data type issues."""
+    import fiona
+    from fiona.crs import from_epsg
+    
+    # Define schema with safe data types
+    schema = {
+        'geometry': 'LineString',  # Assuming FMRs are line features
+        'properties': {}
+    }
+    
+    # Examine each column and assign appropriate schema type
+    for column in gdf.columns:
+        if column == 'geometry':
+            continue
+            
+        col_data = gdf[column].dropna()
+        if len(col_data) == 0:
+            schema['properties'][column] = 'str:254'
+            continue
+            
+        # Sample a few values to determine type
+        sample_val = col_data.iloc[0] if len(col_data) > 0 else None
+        
+        if pd.api.types.is_numeric_dtype(gdf[column]):
+            if pd.api.types.is_integer_dtype(gdf[column]):
+                schema['properties'][column] = 'int:10'
+            else:
+                schema['properties'][column] = 'float:19.11'
+        else:
+            # Default to string for everything else
+            schema['properties'][column] = 'str:254'
+    
+    # Get CRS
+    crs = gdf.crs
+    if crs is None:
+        crs = from_epsg(4326)  # Default to WGS84
+    
+    # Write the shapefile
+    with fiona.open(
+        output_path,
+        'w',
+        driver='ESRI Shapefile',
+        crs=crs,
+        schema=schema
+    ) as output:
+        for idx, row in gdf.iterrows():
+            # Prepare properties dict with safe values
+            properties = {}
+            for column in gdf.columns:
+                if column == 'geometry':
+                    continue
+                
+                value = row[column]
+                if pd.isna(value):
+                    properties[column] = None
+                elif isinstance(value, bytes):
+                    properties[column] = value.decode('utf-8', errors='ignore')
+                else:
+                    properties[column] = value
+            
+            # Create feature
+            feature = {
+                'geometry': row['geometry'].__geo_interface__,
+                'properties': properties
+            }
+            
+            output.write(feature)
+    
+    print(f"Successfully wrote shapefile with custom schema: {output_path}")
+
+def cleanup_auto_updater(auto_updater):
+    """Clean up the file monitoring system"""
+    if auto_updater:
+        auto_updater.stop_monitoring()
+
+# 09/18: Modified create_improved_handle_update
+# - Existing FMRs are labeled using RD_NAME (e.g., "Existing Bridge")
+# - Others use sequential FMR-# naming without gaps
+# - Popup logic simplified for existing rows (only shows infrastructure type)
+def create_improved_handle_update(shapefile_path):
+    def improved_handle_update():
+        try:
+            gdf = gpd.read_file(shapefile_path).to_crs("EPSG:4326")
+
+            # 09/18: Add IsExisting column based on RD_NAME
+            if "RD_NAME" in gdf.columns:
+                gdf["IsExisting"] = gdf["RD_NAME"].astype(str).str.strip().str.lower().str.startswith("existing")
+            else:
+                gdf["IsExisting"] = False
+
+            # Start fresh map
+            fmap = folium.Map(location=[15.0, 121.0], zoom_start=8, tiles="cartodbpositron")
+
+            fmr_counter = 0  # 09/18: independent counter for non-existing FMRs
+
+            for idx, row in gdf.iterrows():
+                # 09/18: Naming rule
+                if row.get("IsExisting", False):
+                    fmr_name = str(row.get("RD_NAME", f"Existing-{idx}"))
+                else:
+                    fmr_name = f"FMR-{fmr_counter}"
+                    fmr_counter += 1
+
+                # 09/18: Build popup differently for Existing vs Non-existing
+                if row.get("IsExisting", False):
+                    popup_html = f"""
+                    <b>Existing Infrastructure:</b> {row.get("RD_NAME", "N/A")}
+                    """
+                else:
+                    popup_html = f"""
+                    <b>FMR ID:</b> {fmr_name}<br>
+                    <b>FMR Name:</b> {row.get("RD_NAME", "N/A")}<br>
+                    <b>Barangay:</b> {row.get("Barangay", "N/A")}<br>
+                    <b>Municipality:</b> {row.get("Municipality", "N/A")}<br>
+                    <b>Province:</b> {row.get("Province", "N/A")}
+                    """
+
+                # Add feature to map
+                if row.geometry.geom_type == "LineString":
+                    folium.PolyLine(
+                        locations=[(y, x) for x, y in row.geometry.coords],
+                        color="blue",
+                        weight=3,
+                        opacity=0.8,
+                        tooltip=fmr_name,
+                        popup=folium.Popup(popup_html, max_width=300)  # 09/18
+                    ).add_to(fmap)
+
+                elif row.geometry.geom_type == "MultiLineString":
+                    for line in row.geometry:
+                        folium.PolyLine(
+                            locations=[(y, x) for x, y in line.coords],
+                            color="blue",
+                            weight=3,
+                            opacity=0.8,
+                            tooltip=fmr_name,
+                            popup=folium.Popup(popup_html, max_width=300)  # 09/18
+                        ).add_to(fmap)
+
+            # Save map
+            fmap.save("fmr_interactive_map.html")
+            print("Interactive FMR map created: fmr_interactive_map.html")
+
+        except Exception as e:
+            print(f"Error updating map: {e}")
+
+    return improved_handle_update
+
+def initialize_auto_updater():
+    """Initialize and start the automatic file monitoring system"""
+    
+    # Use the improved update handler
+    handle_update = create_improved_handle_update()
+    
+    auto_updater = AutoUpdater(
+        shapefile_path=shapefile_path,
+        raster_folder=bsg_folder,
+        update_fmr_callback=updateFMRs,
+        update_db_callback=getDatabase
+    )
+    
+    # Override the update callback to use our custom handler
+    auto_updater._handle_update = handle_update
+    
+    auto_updater.start_monitoring()
+    return auto_updater
 
 ## ================= DISPLAY FUNCTIONS =============== ##
 
@@ -715,7 +969,7 @@ def get_matching_images():
     data = request.json
     fmr_id = data.get("fmr_id")
     fmr_name = str(gdf.loc[fmr_id].get("name", f"FMR-{fmr_id}"))
-    fmr_db_file = os.path.join(os.path.dirname(shapefile_path), "fmr_database.csv")
+    fmr_db_file = os.path.join(os.path.dirname(shapefile_path), "fmr_database_aina.csv")
 
     if not os.path.exists(fmr_db_file):
         return jsonify({"status": "error", "message": "FMR database not found"}), 404
@@ -750,7 +1004,7 @@ def get_matching_images():
 ## Added 07/28 2:04; for image-available FMR visibility
 @app.route('/get_fmrs_with_images', methods=['GET'])
 def get_fmrs_with_images():
-    fmr_db_file = os.path.join(os.path.dirname(shapefile_path), "fmr_database.csv")
+    fmr_db_file = os.path.join(os.path.dirname(shapefile_path), "fmr_database_aina.csv")
 
     if not os.path.exists(fmr_db_file):
         return jsonify({"status": "error", "message": "FMR database not found"}), 404
@@ -765,7 +1019,7 @@ def get_fmrs_with_images():
 
 @app.route('/')
 def serve_map():
-    return send_file(r"C:\Users\user-307E123400\Desktop\BAFE FMR\fmr_interactive_map.html")  # Path changed aina
+    return send_file(r"C:\Users\user-307E4B3400\Desktop\BAFE FMR\fmr_interactive_map.html")  # Path changed aina
 
 
 @app.route('/select', methods=['POST'])
@@ -798,7 +1052,7 @@ def clear_selections():
     return jsonify({"status": "cleared"})
 
 
-@app.route('/filter', methods=['POST'])
+@app.route('/filter_by_province', methods=['POST'])
 def filter_by_province():
     province = request.json.get("province")
     global filtered_gdf
@@ -810,19 +1064,21 @@ def filter_by_province():
         create_fmr_map(filtered_gdf)
         return jsonify({"status": "filtered", "count": len(filtered_gdf)})
 
-
-@app.route('/update_fmr', methods=['POST'])
-def update_fmr_route():
-    try:
-        updateFMRs(shapefile_path)
-        getDatabase()
-        global gdf, filtered_gdf
-        gdf = gpd.read_file(shapefile_path).to_crs(epsg=32651)
-        filtered_gdf = gdf.copy()
-        create_fmr_map(gdf)
-        return jsonify({"status": "success", "message": "FMR updated successfully"})
-    except Exception as e:
-        return jsonify({"status": "error", "message": str(e)}), 500
+#08/29: removed update_fmr_route, replaced with update status
+@app.route('/auto_update_status', methods=['GET'])
+def auto_update_status():
+    """Check if auto-update monitoring is active"""
+    global auto_updater
+    
+    status = {
+        "auto_update_enabled": auto_updater is not None and auto_updater.is_monitoring,
+        "monitoring_paths": {
+            "shapefile_dir": os.path.dirname(shapefile_path),
+            "raster_dir": bsg_folder
+        } if auto_updater else None
+    }
+    
+    return jsonify(status)
 
 
 @app.route('/export', methods=['POST'])
@@ -957,20 +1213,30 @@ def display_selected_image():
 def run_flask():
     """Run the Flask app using Waitress."""
     serve(app, host="127.0.0.1", port=5000)
-
+# 09/18: Labelling of existing concrete/bridge in map
 def create_fmr_map(input_gdf=None):
+    import json  # used to safely serialize fmr_name into JS
     map_gdf = input_gdf if input_gdf is not None else gdf
     if map_gdf.empty:
         print("Shapefile is empty!")
         return ""
 
-    fmr_db_file = os.path.join(os.path.dirname(shapefile_path), "fmr_database.csv")
-    fmr_database = None
+    fmr_db_file = os.path.join(os.path.dirname(shapefile_path), "fmr_database_migo.csv")
+    fmr_database_migo = None
     if os.path.exists(fmr_db_file):
         try:
-            fmr_database = pd.read_csv(fmr_db_file)
+            fmr_database_migo = pd.read_csv(fmr_db_file)
         except Exception as e:
             print(f"Error loading FMR database: {e}")
+
+    # 09/18: Mark existing infra
+    if "RD_NAME" in map_gdf.columns:
+        map_gdf["IsExisting"] = map_gdf["RD_NAME"].astype(str).str.strip().str.lower().str.startswith("existing")
+    else:
+        map_gdf["IsExisting"] = False
+
+    if "YEAR_COM" not in map_gdf.columns:
+        map_gdf["YEAR_COM"] = None
 
     center = map_gdf.unary_union.centroid
     fmap = folium.Map(location=[center.y, center.x], zoom_start=10, tiles="Esri.WorldImagery")
@@ -980,17 +1246,24 @@ def create_fmr_map(input_gdf=None):
         layer_name = f"geoLayer_{idx}"
         brgy = row.get("BRGY_NAME", "N/A")
         mun = row.get("MUN_NAME", "N/A")
-        prov = row.get("PROV_NAME", "N/A")
-        fmr_name = str(row.get("name", f"FMR-{idx}"))
+        prov = row.get("PROV_NAME", "N/A") if "PROV_NAME" in row else "N/A"
+        year_completed = row.get("YEAR_COM", "N/A")
 
+        if row.get("IsExisting", False):
+            fmr_name = str(row.get("RD_NAME", f"Existing-{idx}"))
+        else:
+            fmr_name = str(row.get("name", f"FMR-{idx}"))
+
+        # === BSG info ===
         bsg_info = ""
-        if fmr_database is not None:
-            fmr_entries = fmr_database[(fmr_database["FMR"] == fmr_name) & (fmr_database["BSG"].notna()) & (fmr_database["BSG"] != "")]
-
-            # 08/22: Should filter out "manual" Processing types to avoid displaying duplicate image names in GUI
-            if "Processing Type" in fmr_database.columns:
+        if fmr_database_migo is not None:
+            fmr_entries = fmr_database_migo[
+                (fmr_database_migo["FMR"] == fmr_name)
+                & (fmr_database_migo["BSG"].notna())
+                & (fmr_database_migo["BSG"] != "")
+            ]
+            if "Processing Type" in fmr_database_migo.columns:
                 fmr_entries = fmr_entries[~fmr_entries["Processing Type"].astype(str).str.lower().eq("manual")]
-            
             if not fmr_entries.empty:
                 bsg_info = "<b>Available BSG Images:</b><br>"
                 for _, db_row in fmr_entries.iterrows():
@@ -1004,32 +1277,56 @@ def create_fmr_map(input_gdf=None):
             else:
                 bsg_info = "<b>BSG Images:</b> No matching images found<br><br>"
 
-        popup_html = f"""
-        <div style='word-wrap: break-word; max-width: 350px;'>
-            <b>FMR ID:</b> {idx}<br>
-            <b>FMR Name:</b> {fmr_name}<br>
-            <b>Barangay:</b> {brgy}<br>
-            <b>Municipality:</b> {mun}<br>
-            <b>Province:</b> {prov}<br><br>
-            {bsg_info}
-            <div style="display: flex; gap: 8px; margin-top: 5px;">
-                <button onclick="selectFMR({idx})">Select FMR</button>
-                <button onclick="deselectFMR({idx})">Deselect FMR</button>
+        # === Popup HTML ===
+        if row.get("IsExisting", False):
+            popup_html = f"""
+            <div style='word-wrap: break-word; max-width: 350px;
+                        background-color: #f8d7da; padding: 8px; border-radius: 5px;'>
+                <b>Existing Infrastructure:</b> {row.get("RD_NAME", "N/A")}
             </div>
-        </div>
-        """
+            """
+        else:
+            popup_html = f"""
+            <div style='word-wrap: break-word; max-width: 350px;
+                        background-color: #ffffff; padding: 8px; border-radius: 5px;'>
+                <b>FMR ID:</b> {idx}<br>
+                <b>FMR Name:</b> {fmr_name}<br>
+                <b>Year Completed:</b> {year_completed}<br>
+                <b>Barangay:</b> {brgy}<br>
+                <b>Municipality:</b> {mun}<br>
+                <b>Province:</b> {prov}<br><br>
+                {bsg_info}
+                <div style="display: flex; gap: 8px; margin-top: 5px;">
+                    <button onclick="selectFMR({idx})">Select FMR</button>
+                    <button onclick="deselectFMR({idx})">Deselect FMR</button>
+                </div>
+            </div>
+            """
+
+        # === Styling ===
+        def style_function(feature, is_existing=row.get("IsExisting", False)):
+            if is_existing:
+                return {"color": "gray", "weight": 3.5, "dashArray": "5, 5"}
+            else:
+                return {"color": "yellow", "weight": 3.5}
 
         geojson = folium.GeoJson(
             row.geometry,
             name=layer_name,
-            tooltip=f"FMR ID: {idx}",
-            style_function=lambda feature: {"color": "yellow", "weight": 3.5},
+            tooltip=fmr_name,
+            style_function=style_function,
         )
         geojson.add_child(folium.Popup(popup_html, max_width=400))
         geojson.add_to(fmap)
 
         geojson_js_var = geojson.get_name()
+
+        # =========== 10/01: Expose fmrName -> layer mapping for reliable pan ===========
         geo_layer_var_lines.append(f"geoLayers['{layer_name}'] = {geojson_js_var};")
+        geo_layer_var_lines.append(
+            f"window.fmrNameToLayer = window.fmrNameToLayer || {{}}; window.fmrNameToLayer[{json.dumps(fmr_name)}] = {geojson_js_var};"
+        )
+        # ============================================================================
 
     geo_layer_script = "\n".join(geo_layer_var_lines)
     provinces = sorted(set(p.title() for p in gdf["PROV_NAME"].dropna()))
@@ -1038,7 +1335,7 @@ def create_fmr_map(input_gdf=None):
     js_ui = f"""
         <link rel="stylesheet" href="https://unpkg.com/leaflet-draw/dist/leaflet.draw.css" />
         <script src="https://unpkg.com/leaflet-draw/dist/leaflet.draw.js"></script>
-        <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css" integrity="sha512-papER...=="
+        <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css"
             crossorigin="anonymous" referrerpolicy="no-referrer" />
         <script src="/static/fmr_ui_script.js"></script>
         
@@ -1077,13 +1374,11 @@ def create_fmr_map(input_gdf=None):
                 color: #777777;
                 cursor: not-allowed;
             }}
-            /* 08/27: Disabled Run button style */
             #runBtn:disabled {{
                 background-color: #e0e0e0 !important;
                 color: #777777 !important;
                 cursor: not-allowed !important;
             }}
-            /* 08/27: Disabled Clear button style */
             #clearBtn:disabled {{
                 background-color: #e0e0e0 !important;
                 color: #777777 !important;
@@ -1098,8 +1393,6 @@ def create_fmr_map(input_gdf=None):
                 color: #999;
                 cursor: not-allowed;
             }}
-        
-            /* ========== Modal Styling ========== */
             #processing-modal {{
                 display: none;
                 position: fixed;
@@ -1154,8 +1447,6 @@ def create_fmr_map(input_gdf=None):
                 background-color: #dc3545;
                 color: white;
             }}
-
-            /* ========== Image Toggle Button ========== */
             .leaflet-top.leaflet-right .leaflet-control-image-toggle {{
                 background-color: #fff;
                 width: 30px;
@@ -1176,9 +1467,8 @@ def create_fmr_map(input_gdf=None):
                 background-color: #4285f4;
                 color: white;
             }}
-             
             .draw-fmr-btn, .delete-fmr-btn {{
-                background-color: #4CAF50; /* draw = green */
+                background-color: #4CAF50;
                 border: none;
                 color: white;
                 padding: 6px 8px;
@@ -1189,24 +1479,14 @@ def create_fmr_map(input_gdf=None):
                 align-items: center;
                 justify-content: center;
             }}
-            .draw-fmr-btn i, .delete-fmr-btn i {{
-                pointer-events: none;
-            }}
             .delete-fmr-btn {{
-                background-color: #dc3545; /* delete = red */
+                background-color: #dc3545;
             }}
             .draw-fmr-btn:hover {{
                 background-color: #45a049;
             }}
             .delete-fmr-btn:hover {{
                 background-color: #a71d2a;
-            }}
-            /* ========== 8/13: End of changes ========== */
-            .draw-fmr-btn:hover {{
-                background-color: #45a049;
-            }}
-            .draw-fmr-btn i {{
-                pointer-events: none; /* icon won't capture clicks */
             }}
             #selected-fmrs-panel {{
                 position: fixed;
@@ -1221,100 +1501,186 @@ def create_fmr_map(input_gdf=None):
                 max-height: 50vh;
                 overflow-y: auto;
             }}
+            #auto-update-status {{
+                background-color: #d4edda;
+                border: 1px solid #c3e6cb;
+                color: #155724;
+                padding: 8px;
+                border-radius: 4px;
+                margin-top: 10px;
+                font-size: 0.9em;
+            }}
         </style>
 
-        <!------------ Selection Panel ------------>
         <div id="selection-panel">
-            <!-- 08/27: Selected FMRs has been removed since i made it a standalone panel -->
             <b>Province Filter:</b>
-            <select id="provinceSelect" onchange="filterByProvince()">
+            <select id="provinceSelect" onchange="filter_by_province()">
                 <option value="All">All</option>
                 {province_options}
             </select>
             <button onclick="downloadSelected()">Export Selected</button>
-            <button onclick="updateFMRs()">Update FMR</button>
-            <div id="dynamic-processing-panel" style="margin-top: 20px;"></div>
+            <div id="dynamic-processing-panel" style="margin-top: 30px;"></div>
         </div>
 
-        <!-- 08/27: NEW PANEL for Selected FMRs -->
         <div id="selected-fmrs-panel">
             <b>Selected FMR(s):</b>
             <ul id="fmr-list"></ul>
-            
-            <!-- 08/27: Run + Clear buttons relocated here -->
             <button id="runBtn" onclick="showProcessingModal()" disabled 
-                    style="width: 100%; margin-top: 10px; background-color: #28a745; color: white; border: none; padding: 6px; border-radius: 4px; cursor: pointer;">
+                    style="width: 100%; margin-top: 10px; background-color: #28a745; color: white;">
                 Run
             </button>
             <button id="clearBtn" onclick="clearSelections()" disabled
-                    style="width: 100%; margin-top: 6px; background-color: #dc3545; color: white; border: none; padding: 6px; border-radius: 4px; cursor: pointer;">
+                    style="width: 100%; margin-top: 6px; background-color: #dc3545; color: white;">
                 Clear
             </button>
         </div>
 
-        <!-- 08/05: Fixing polyline issue on whole Processing Modal. Added back the backlashes. Escape sequence error? -->
-        <!-- Processing Modal -->
-        <div id=\"processing-modal\">
-            <div id=\"processing-modal-content\">
+        <div id="processing-modal">
+            <div id="processing-modal-content">
                 <h3>Processing Options</h3>
-
-                <div class=\"option-group\">
+                <div class="option-group">
                     <strong>Process:</strong>
-                    <label><input type=\"radio\" name=\"process-type\" value=\"selected\" checked> Selected images only</label>
-                    <label><input type=\"radio\" name=\"process-type\" value=\"all\"> All images</label>
+                    <label><input type="radio" name="process-type" value="selected" checked> Selected images only</label>
+                    <label><input type="radio" name="process-type" value="all"> All images</label>
                 </div>
-
-                <div class=\"option-group\">
+                <div class="option-group">
                     <strong>Workflow Type:</strong>
-                    <label><input type=\"radio\" name=\"workflow-type\" value=\"manual\" onchange=\"toggleManualSection()\"> Manual</label>
-                    <label><input type=\"radio\" name=\"workflow-type\" value=\"automatic\" onchange=\"toggleManualSection()\" checked> Automatic</label>
+                    <label><input type="radio" name="workflow-type" value="manual" onchange="toggleManualSection()"> Manual</label>
+                    <label><input type="radio" name="workflow-type" value="automatic" onchange="toggleManualSection()" checked> Automatic</label>
                 </div>
-                <!-- 08/13 manual processing designing -->
-                <!-- Manual Drawing UI -->
                 <div id="manual-fmr-section" style="display: none; margin-top: 10px;">
                     <strong>Draw FMR Centerlines:</strong>
                     <div id="manual-fmr-container" style="margin-bottom: 10px;"></div>
                     <button type="button" onclick="addManualFMRRow()">+ Add FMR</button>
                 </div>
-
-                <div class=\"option-group\">
+                <div class="option-group">
                     <strong>Image Type:</strong>
-                    <select id=\"image-type\">
-                        <option value=\"BSG\">BSG</option>
-                        <option value=\"PNEO\">PNEO</option>
-                        <option value=\"SkySat\">SkySat</option>
+                    <select id="image-type">
+                        <option value="BSG">BSG</option>
+                        <option value="PNEO">PNEO</option>
+                        <option value="SkySat">SkySat</option>
                     </select>
                 </div>
-
-                <div class=\"modal-buttons\">
-                    <button id=\"cancel-processing\" onclick=\"hideProcessingModal()\">Close</button>
-                    <button id=\"run-processing\" onclick=\"runProcessing()\">Run</button>
+                <div class="modal-buttons">
+                    <button id="cancel-processing" onclick="hideProcessingModal()">Close</button>
+                    <button id="run-processing" onclick="runProcessing()">Run</button>
                 </div>
             </div>
         </div>
 
-        <!-- Image Toggle Button (Leaflet top-right) -->
         <div class="leaflet-top leaflet-right">
-            <div class="leaflet-control leaflet-bar leaflet-control-image-toggle" title="Show FMRs with Satellite Images" onclick="toggleImageVisibility(this)">
+            <div class="leaflet-control leaflet-bar leaflet-control-image-toggle" 
+                 title="Show FMRs with Satellite Images" onclick="toggleImageVisibility(this)">
                 <i class="fas fa-image"></i>
             </div>
         </div>
         
-        <!-- 08/27: Collapsible main controls button relocated here -->
         <div id="toggle-main-controls" 
-            style="position: fixed; bottom: 5px; left: 5px; 
-                    background: #fff; 
-                    border-radius: 6px; 
-                    padding: 6px 8px; 
-                    box-shadow: 0 2px 6px rgba(0,0,0,0.4); 
-                    z-index: 10000; 
-                    cursor: pointer;">
+            style="position: fixed; bottom: 5px; left: 5px; background: #fff; border-radius: 6px;
+                   padding: 6px 8px; box-shadow: 0 2px 6px rgba(0,0,0,0.4); z-index: 10000; cursor: pointer;">
             <i class="fas fa-sliders-h"></i>
         </div>
+        
+        <script>
+        function filter_by_province() {{
+            const province = document.getElementById("provinceSelect").value;
+            fetch("/filter_by_province", {{
+                method: "POST",
+                headers: {{ "Content-Type": "application/json" }},
+                body: JSON.stringify({{ province: province }})
+            }})
+            .then(res => res.json())
+            .then(data => {{
+                console.log("Province filter applied:", data);
+                alert("Filtered to " + province + " (" + data.count + " FMRs)");
+                location.reload();
+            }})
+            .catch(err => console.error("Error filtering province:", err));
+        }}
+
+        // 09/30: Manual workflow → Draw icon zooms to FMR + starts polyline + reopen modal after finish
+        (function () {{
+            function initWhenReady() {{
+                if (!document.body) return setTimeout(initWhenReady, 100);
+                if (!window._map) return setTimeout(initWhenReady, 150);
+
+                const map = window._map;
+                if (window.__manualDrawInit) return;
+                window.__manualDrawInit = true;
+
+                if (!window.__manualDrawnItems) {{
+                    window.__manualDrawnItems = new L.FeatureGroup();
+                    map.addLayer(window.__manualDrawnItems);
+                }}
+
+                let activeHandler = null;
+                function startManualPolyline() {{
+                    if (activeHandler) {{
+                        activeHandler.disable();
+                        activeHandler = null;
+                    }}
+                    activeHandler = new L.Draw.Polyline(map, {{
+                        shapeOptions: {{ color: "yellow", weight: 3.5 }}
+                    }});
+                    activeHandler.enable();
+                    window.startManualPolyline = startManualPolyline;
+                }}
+                // 10/01: Zoom to FMR on Draw button click
+                document.addEventListener("click", function (e) {{
+                    if (e.target && e.target.classList.contains("draw-fmr-btn")) {{
+                        const row = e.target.closest(".manual-fmr-row");
+                        if (!row) return;
+
+                        const fmrSelect = row.querySelector(".manual-fmr-select");
+                        if (fmrSelect) {{
+                            const fmrName = fmrSelect.value;   // e.g. "FMR-12"
+                            let matchedLayer = null;
+
+                            // ✅ Match by tooltip text, which is the database FMR name
+                            for (let key in geoLayers) {{
+                                const layer = geoLayers[key];
+                                if (layer && layer.getTooltip && layer.getTooltip().getContent() === fmrName) {{
+                                    matchedLayer = layer;
+                                    break;
+                                }}
+                            }}
+
+                            if (matchedLayer) {{
+                                map.fitBounds(matchedLayer.getBounds());
+                                console.log("10/01: Zoomed to FMR →", fmrName);
+                            }} else {{
+                                console.warn("10/01: Could not find FMR layer for", fmrName);
+                            }}
+                        }}
+
+                        startManualPolyline(); // keep starting draw after pan
+                    }}
+                }});
+                // ============================================================================
+
+                map.on(L.Draw.Event.CREATED, function (e) {{
+                    if (e.layerType === "polyline") {{
+                        window.__manualDrawnItems.addLayer(e.layer);
+                        console.log("09/30: Polyline committed", e.layer.getLatLngs());
+                        activeHandler = null;
+
+                        // ✅ Reopen processing modal automatically
+                        const modal = document.getElementById("processing-modal");
+                        if (modal) modal.style.display = "flex";
+                    }}
+                }});
+
+                map.on(L.Draw.Event.DRAWSTOP, function () {{
+                    activeHandler = null;
+                    console.log("09/30: Drawing stopped/cancelled");
+                }});
+            }}
+            initWhenReady();
+        }})();
+        </script>
     """
 
     fmap.get_root().html.add_child(folium.Element(js_ui))
-
     fmap.get_root().html.add_child(folium.Element(f"""
         <script>
             L.Map.addInitHook(function () {{
@@ -1324,7 +1690,6 @@ def create_fmr_map(input_gdf=None):
             }});
         </script>
     """))
-
     fmap.get_root().html.add_child(folium.Element("""
         <script>
             L.Map.addInitHook(function () {
@@ -1334,7 +1699,7 @@ def create_fmr_map(input_gdf=None):
         </script>
     """))
 
-    html_path = "C:/Users/user-307E123400/Desktop/BAFE FMR/fmr_interactive_map.html"
+    html_path = r"C:\Users\user-307E123400\Desktop\BAFE FMR\fmr_interactive_map.html"
     fmap.save(html_path)
     print("Interactive FMR map created: fmr_interactive_map.html")
     return os.path.abspath(html_path)
@@ -1346,12 +1711,12 @@ def create_fmr_map(input_gdf=None):
 class FMRMainWindow(QMainWindow):
     """Main window for the FMR GUI application."""
     
-    def __init__(self):
+    def __init__(self, auto_updater_instance=None):
         super().__init__()
+        self.auto_updater = auto_updater_instance
         self.init_ui()
         self.flask_thread = None
         self.start_flask_server()
-
         # self.start_workflow()
     
     ## Workflow selection, 
@@ -1367,7 +1732,7 @@ class FMRMainWindow(QMainWindow):
 
     def init_ui(self):
         """Initialize the user interface."""
-        self.setWindowTitle("FMR Processing GUI")
+        self.setWindowTitle("FMR Processing GUI - Auto-Update Enabled")  # Updated title
         self.setGeometry(100, 100, 1200, 800)
         
         # Create central widget and layout
@@ -1387,7 +1752,7 @@ class FMRMainWindow(QMainWindow):
         if self.flask_thread is None:
             self.flask_thread = threading.Thread(target=run_flask, daemon=True)
             self.flask_thread.start()
-            print("✅ Flask server started on http://127.0.0.1:5000")
+            print("Flask server started on http://127.0.0.1:5000")
         
     def load_map(self):
         """Load the FMR map in the web view."""
@@ -1401,11 +1766,17 @@ class FMRMainWindow(QMainWindow):
     def closeEvent(self, event):
         """Handle application close event."""
         print("Closing FMR GUI application...")
+        
+        # Stop file monitoring if it exists
+        if self.auto_updater:
+            print("Shutting down file monitoring...")
+            self.auto_updater.stop_monitoring()
+            
         event.accept()
 
 def migrate_database_add_processing_type():
     """Add Processing Type column to existing database if it doesn't exist"""
-    fmr_db_file = os.path.join(os.path.dirname(shapefile_path), "fmr_database.csv")
+    fmr_db_file = os.path.join(os.path.dirname(shapefile_path), "fmr_database_aina.csv")
     
     if not os.path.exists(fmr_db_file):
         print("Database file does not exist, no migration needed.")
@@ -1429,11 +1800,14 @@ def migrate_database_add_processing_type():
         print(f"Error during database migration: {str(e)}")
 
 def main():
-    """Main function to run the FMR GUI application."""
+    """08/29: Modified main function that includes automatic file monitoring"""
+    global auto_updater
+    
     print("Starting FMR Processing GUI...")
 
-    # Update FMR shapefiles first (merge any new shapefiles into master)
-    print("Updating FMR shapefiles...")
+    # Perform initial updates
+    print("Performing initial FMR and database update...")
+    
     try:
         updateFMRs(shapefile_path)
         print("FMR shapefiles updated successfully.")
@@ -1443,15 +1817,13 @@ def main():
 
     try:
         global gdf, filtered_gdf
-        gdf = gpd.read_file(shapefile_path).to_crs(epsg=4326)  # Reproject to WGS84
+        gdf = gpd.read_file(shapefile_path).to_crs(epsg=4326)
         filtered_gdf = gdf.copy()
         print(f"Loaded {len(gdf)} FMR features")
     except Exception as e:
         print(f"Error loading shapefile: {e}")
         return
 
-    # Initialize/update the database
-    print("Initializing/updating FMR database...")
     try:
         getDatabase()
         print("FMR database updated successfully")
@@ -1467,23 +1839,42 @@ def main():
         print(f"Error creating map: {e}")
         return
     
+    # Initialize auto-updater
+    print("Initializing automatic file monitoring...")
+    try:
+        auto_updater = initialize_auto_updater()
+        print("File monitoring started successfully")
+    except Exception as e:
+        print(f"Warning: Could not start file monitoring: {e}")
+        print("Manual updates will still be available")
+        auto_updater = None
+    
     # Create and run the GUI application
     app = QApplication(sys.argv)
-    
-    # Set application properties
     app.setApplicationName("FMR Processing GUI")
     app.setApplicationVersion("1.0")
     app.setOrganizationName("Philippine Space Agency")
     
     # Create and show main window
-    main_window = FMRMainWindow()
+    main_window = FMRMainWindow(auto_updater)
     main_window.show()
     
     print("FMR GUI application ready!")
+    
+    if auto_updater:
+        print("Automatic file monitoring is ACTIVE")
+        print("New shapefiles and images will be detected automatically")
+    else:
+        print("Automatic file monitoring is DISABLED")
     print("Access the web interface at: http://127.0.0.1:5000")
     
     # Run the application
-    sys.exit(app.exec_())
+    try:
+        sys.exit(app.exec_())
+    finally:
+        # Cleanup auto-updater on exit
+        if auto_updater:
+            auto_updater.stop_monitoring()
 
 
 if __name__ == "__main__":
