@@ -1,5 +1,3 @@
-// PLease check 09/01
-// JavaScript logic for FMR GUI
 
 const selectedIds = new Set();
 const geoLayers = {};
@@ -177,7 +175,6 @@ style.textContent = `
 `;
 document.head.appendChild(style);
 
-// 09/01: After rebuilding, attach a delegated change-listener once (handles dynamic lists) and sync Run button state
 function updateFMRList() {
     const ul = document.getElementById("fmr-list");
 
@@ -262,7 +259,6 @@ function updateFMRList() {
                     checkbox.disabled = false;
                 }, 300);
 
-                // (kept) direct listener is fine; delegated listener below is the safety net
                 checkbox.addEventListener("change", updateRunButtonState);
             });
         } else {
@@ -286,28 +282,16 @@ function updateFMRList() {
         const layer = geoLayers["geoLayer_" + id];
         if (layer) layer.setStyle({color: "red", weight: 3.5});
     });
-
-    // 09/01: Attach a single delegated listener (idempotent) to catch check/uncheck on dynamically created checkboxes
-    if (!window.__imageCheckboxRunWatcherAttached) { // 09/01
-        window.__imageCheckboxRunWatcherAttached = true; // 09/01
-        document.addEventListener("change", function (e) { // 09/01
-            if (e.target && e.target.classList && e.target.classList.contains("image-checkbox")) { // 09/01
-                updateRunButtonState(); // 09/01: disable when last is unchecked, enable when first is checked
-            } // 09/01
-        }, true); // 09/01 (capture to run early)
-    }
-
-    updateRunButtonState(); // 09/01: sync Run with the freshly rebuilt list (stays disabled if none checked)
 }
 
-// 09/01: Changed logic so Run button is enabled ONLY when at least one image is checked
+// 08/27: Enable/disable Run button dynamically
 function updateRunButtonState() {
-    const runBtn = document.getElementById("runBtn");
-    if (!runBtn) return;
+  const runBtn = document.getElementById("runBtn");
+  if (!runBtn) return;
 
-    // 09/01: Only enable Run if any image checkboxes are checked
-    const anyImagesChecked = document.querySelectorAll(".image-checkbox:checked").length > 0;
-    runBtn.disabled = !anyImagesChecked; // 09/01: updated logic
+  // count selected checkboxes
+  const anySelected = document.querySelectorAll(".image-checkbox:checked").length > 0;
+  runBtn.disabled = !anySelected;
 }
 
 function toggleAllFMRs(expand) {
@@ -323,7 +307,6 @@ function toggleAllFMRs(expand) {
     });
 }
 
-// 09/01: Added updateClearButtonState() after updating FMR list to keep Clear button enabled. Also removed upodateRunButtonState() here
 function selectFMR(fmr_id) {
     fetch("http://localhost:5000/select", {
         method: "POST",
@@ -334,6 +317,7 @@ function selectFMR(fmr_id) {
     .then(data => {
         if (data.status === "selected") {
             selectedIds.add(fmr_id);
+            updateRunButtonState();  // for updating the run button (disabling/enabling)
             return fetch("http://localhost:5000/get_matching_images", {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
@@ -348,12 +332,10 @@ function selectFMR(fmr_id) {
     .then(imageData => {
         currentMatchingImages[fmr_id] = imageData.status === "success" ? imageData.images || [] : [];
         updateFMRList();
-        updateClearButtonState(); // 09/01: refresh Clear button state after selecting
     })
     .catch(err => console.error("Error in selectFMR:", err));
 }
 
-// 09/01: Added updateClearButtonState() after updating FMR list to keep Clear button enabled when others remain. Also removed upodateRunButtonState() here
 function deselectFMR(fmr_id) {
     fetch("http://localhost:5000/deselect", {
         method: "POST",
@@ -363,6 +345,7 @@ function deselectFMR(fmr_id) {
     .then(data => {
         if (data.status === "deselected") {
             selectedIds.delete(fmr_id);
+            updateRunButtonState();
             
             // Remove all overlays for this FMR
             const images = currentMatchingImages[fmr_id] || [];
@@ -370,7 +353,6 @@ function deselectFMR(fmr_id) {
             
             delete currentMatchingImages[fmr_id];
             updateFMRList();
-            updateClearButtonState(); // 09/01: refresh Clear button state after deselecting
             
             const layer = geoLayers["geoLayer_" + fmr_id];
             if (layer) layer.setStyle({color: "yellow", weight: 3.5});
@@ -380,7 +362,6 @@ function deselectFMR(fmr_id) {
     });
 }
 
-// 09/01: Added updateClearButtonState() at the end so Clear button disables immediately after clearing everything
 function clearSelections() {
     fetch("http://localhost:5000/clear", {method: "POST"})
     .then(res => res.json())
@@ -388,9 +369,8 @@ function clearSelections() {
         if (data.status === "cleared") {
             selectedIds.clear();
             updateRunButtonState();
-            updateClearButtonState(); // 09/01: disable Clear button right after clearing
-            // 09/01: this ensures the Clear button is not left enabled
-
+            updateClearButtonState();
+            
             // Remove all overlays
             Object.keys(overlayLayers).forEach(key => {
                 if (overlayLayers[key]) {
@@ -416,62 +396,8 @@ function clearSelections() {
     });
 }
 
-// removed updateFMRs; replaced with autoU update functions
-function checkAutoUpdateStatus() {
-    fetch('/auto_update_status')
-    .then(res => res.json())
-    .then(data => {
-        if (data.auto_update_enabled) {
-            console.log('Auto-update monitoring is active');
-            console.log('Monitoring paths:', data.monitoring_paths);
-        } else {
-            console.log('Auto-update monitoring is disabled');
-        }
-    })
-    .catch(err => console.error('Error checking auto-update status:', err));
-}
-
-function displayAutoUpdateStatus() {
-    fetch('/auto_update_status')
-    .then(res => res.json())
-    .then(data => {
-        const panel = document.getElementById('selection-panel');
-        if (panel && data.auto_update_enabled) {
-            // Add a status indicator showing auto-update is active
-            const statusDiv = document.createElement('div');
-            statusDiv.id = 'auto-update-status';
-            statusDiv.style.cssText = `
-                background-color: #d4edda;
-                border: 1px solid #c3e6cb;
-                color: #155724;
-                padding: 8px;
-                border-radius: 4px;
-                margin-top: 10px;
-                font-size: 0.9em;
-            `;
-            statusDiv.innerHTML = '<strong>Auto-Update Active</strong><br>New files will be detected automatically';
-            
-            // Insert after province filter
-            const provinceSelect = document.getElementById('provinceSelect');
-            if (provinceSelect && provinceSelect.parentNode) {
-                provinceSelect.parentNode.insertBefore(statusDiv, provinceSelect.nextSibling);
-            }
-        }
-    })
-    .catch(err => console.error('Error displaying auto-update status:', err));
-}
-
 document.addEventListener('DOMContentLoaded', function() {
-    // Check auto-update status on page load
-    setTimeout(checkAutoUpdateStatus, 1000);
-    
-    // Display status in UI
-    setTimeout(displayAutoUpdateStatus, 1500);
 });
-
-setInterval(function() {
-    checkAutoUpdateStatus();
-}, 300000); // Check every 5 minutes
 
 // Additional utility functions for better overlay management
 function removeAllOverlays() {
@@ -507,7 +433,7 @@ function hideProcessingModal() {
     if (modal) modal.style.display = 'none';
 }
 
-// 09/01: Added updateClearButtonState() to re-enable Clear button after manual/automatic processing
+// 08/13: also had modifications here
 function runProcessing() {
   const workflowType = document.querySelector('input[name="workflow-type"]:checked').value;
   const imageType = document.getElementById('image-type').value; // still passed to keep API stable
@@ -528,21 +454,31 @@ function runProcessing() {
         geometry: m.geometry
       });
     });
-    updateClearButtonState(); // 09/01: ensure Clear button re-enabled after manual processing
     return;
   }
 
+  
   const fmrIds = Array.from(selectedIds);
   const imagesToProcess = [];
   if (processType === 'selected') {
     document.querySelectorAll('.image-checkbox:checked').forEach(cb => {
-      imagesToProcess.push({ fmr_id: parseInt(cb.dataset.fmrId), image_path: cb.dataset.image });
+      imagesToProcess.push({ fmr_id: parseInt(cb.dataset.fmrId), image_path: cb.dataset.imagePath });
+    });
+    if (imagesToProcess.length === 0) {
+      alert('Please select at least one image to process');
+      return;
+    }
+  } else {
+    fmrIds.forEach(fid => {
+      const imgs = currentMatchingImages[fid] || [];
+      imgs.forEach(img => imagesToProcess.push({ fmr_id: fid, image_path: img.path }));
     });
   }
-
-  // ... (rest of your runProcessing logic)
-
-  updateClearButtonState(); // 09/01: ensure Clear button re-enabled after automatic processing
+  if (imagesToProcess.length === 0) {
+    alert('No images found to process');
+    return;
+  }
+  imagesToProcess.forEach(item => processFMR(item.fmr_id, item.image_path, 'automatic', imageType));
 }
 
 // 8:13: Function to process FMRs
@@ -579,31 +515,21 @@ function processFMR(fmr_id, image_path, workflow_type, image_type, manualFMR = n
     });
 }
 
-// 09/01: Rewritten to look ONLY inside #fmr-list and to reliably disable when none are checked
+// Update the run button state based on selections
 function updateRunButtonState() {
-    const runBtn = document.getElementById("runBtn");
-    if (!runBtn) return;
-
-    requestAnimationFrame(() => { // 09/01: ensure we read state after the checkbox toggle applies
-        const container = document.getElementById("fmr-list"); // 09/01: scope to current list to avoid stale/hidden checkboxes
-        const anyImagesChecked = !!(container && container.querySelector(".image-checkbox:checked")); // 09/01: scoped query
-        runBtn.disabled = !anyImagesChecked; // 09/01: disable when none are checked
-    });
+    const runBtn = document.getElementById('runBtn');
+    runBtn.disabled = selectedIds.size === 0;
 }
 
-
-// 09/01: Changed logic so Clear button is enabled if either FMRs are selected OR images are checked
+// 08/27: Enable/disable Clear button depending on selected FMRs
 function updateClearButtonState() {
     const clearBtn = document.getElementById("clearBtn");
-    if (!clearBtn) return;
-
-    // 09/01: check both FMR selections and image selections
-    const anyFMRsSelected = selectedIds.size > 0;
-    const anyImagesChecked = document.querySelectorAll(".image-checkbox:checked").length > 0;
-
-    clearBtn.disabled = !(anyFMRsSelected || anyImagesChecked); // 09/01: updated logic
+    if (selectedIds.size > 0) {
+        clearBtn.disabled = false;
+    } else {
+        clearBtn.disabled = true;
+    }
 }
-
 
 // 08/27: Collapsible main controls (hide/show instead of shrinking)
 document.addEventListener("DOMContentLoaded", () => {
@@ -678,6 +604,8 @@ function addManualFMRRow() {
     row.style.alignItems = 'center';
     row.style.gap = '8px';
     row.style.marginBottom = '10px';
+    row.id = `manual-fmr-${index}`;
+ 
 
     // Draw button - pencil icon only
     const drawBtn = document.createElement('button');
@@ -718,57 +646,237 @@ function removeManualFMRRow(index) {
     manualFMRs = manualFMRs.filter(f => f.id !== index);
 }
 
-// 8/13: Changes
-function drawManualLine(index, selectedFmrId) {
-    manualFMRs[index].selectedFmrId = selectedFmrId;
+// ============================================================================
+// Manual Drawing — Shared Helpers
+// ============================================================================
 
-    // Hide UI, keep map only
-    toggleDrawingUI(true);
+//11/03: lightweight Chaikin smoothing helper (shared)
+function smoothLineChaikin(latlngs, iterations = 1) { //11/03: new
+  let pts = latlngs.map(ll => [ll.lat, ll.lng]); //11/03: new
+  for (let it = 0; it < iterations; it++) { //11/03: new
+    const out = []; //11/03: new
+    for (let i = 0; i < pts.length - 1; i++) { //11/03: new
+      const [x0, y0] = pts[i], [x1, y1] = pts[i+1]; //11/03: new
+      out.push([0.75*x0 + 0.25*x1, 0.75*y0 + 0.25*y1]); //11/03: new
+      out.push([0.25*x0 + 0.75*x1, 0.25*y0 + 0.75*y1]); //11/03: new
+    } //11/03: new
+    pts = [pts[0], ...out, pts[pts.length - 1]]; //11/03: new
+  } //11/03: new
+  return pts.map(p => L.latLng(p[0], p[1])); //11/03: new
+}
 
-    // 🔹 Hide all FMR lines while drawing
-    Object.values(geoLayers).forEach(layer => {
-        window._map.removeLayer(layer);
-    });
+//11/03: measure polyline length in meters (shared)
+function measurePolylineMeters(latlngs) { //11/03: new
+  if (!window._map || latlngs.length < 2) return 0; //11/03: new
+  let m = 0; //11/03: new
+  for (let i = 0; i < latlngs.length - 1; i++) { //11/03: new
+    m += window._map.distance(latlngs[i], latlngs[i+1]); //11/03: new
+  } //11/03: new
+  return m; //11/03: new
+}
 
-    // Initialize draw control if not yet done
-    if (!window._drawControl) {
-        window._drawControl = new L.Control.Draw({
-            draw: {
-                polygon: false,
-                marker: false,
-                circle: false,
-                rectangle: false,
-                circlemarker: false,
-                polyline: { shapeOptions: { color: '#222', weight: 4, opacity: 1.0 } }
-            },
-            edit: false
-        });
-        window._map.addControl(window._drawControl);
+//11/03: light client-side densify for nicer preview (shared)
+function densifyLatLngs(latlngs, stepMeters = 2) { //11/03: new
+  const out = []; //11/03: new
+  for (let i = 0; i < latlngs.length - 1; i++) { //11/03: new
+    const a = latlngs[i], b = latlngs[i+1]; //11/03: new
+    out.push(a); //11/03: new
+    const seg = window._map.distance(a, b); //11/03: new
+    const n = Math.max(0, Math.floor(seg / stepMeters) - 1); //11/03: new
+    for (let k = 1; k <= n; k++) { //11/03: new
+      const t = k / (n + 1); //11/03: new
+      out.push(L.latLng(a.lat + t*(b.lat - a.lat), a.lng + t*(b.lng - a.lng))); //11/03: new
+    } //11/03: new
+  } //11/03: new
+  out.push(latlngs[latlngs.length - 1]); //11/03: new
+  return out; //11/03: new
+}
+
+// ============================================================================
+// Manual Drawing — HUD (QoL: Cursor-Following Tooltip)
+// ============================================================================
+
+let _lengthTip = null; //11/03: new
+
+//11/03: create/ensure a floating tooltip near the cursor
+function ensureMeasureTooltip() { //11/03: new
+  if (_lengthTip) return _lengthTip; //11/03: new
+  _lengthTip = document.createElement('div'); //11/03: new
+  _lengthTip.id = 'draw-length-tip'; //11/03: new
+  _lengthTip.style.position = 'fixed'; //11/03: new
+  _lengthTip.style.zIndex = 9999; _lengthTip.style.pointerEvents = 'none'; //11/03: new
+  _lengthTip.style.left = '0px'; _lengthTip.style.top = '0px'; //11/03: new
+  _lengthTip.style.padding = '6px 10px'; //11/03: new
+  _lengthTip.style.background = 'rgba(0,0,0,0.65)'; _lengthTip.style.color = '#fff'; //11/03: new
+  _lengthTip.style.borderRadius = '6px'; _lengthTip.style.font = '12px/1.2 sans-serif'; //11/03: new
+  _lengthTip.style.borderTop = '2px solid #4ade80'; //11/03: new
+  _lengthTip.style.borderBottom = '2px solid #4ade80'; //11/03: new
+  _lengthTip.textContent = 'Length: 0 m'; //11/03: new
+  document.body.appendChild(_lengthTip); //11/03: new
+  return _lengthTip; //11/03: new
+}
+
+//11/03: update text in tooltip
+function updateMeasureTooltipText(meters) { //11/03: new
+  const tip = ensureMeasureTooltip(); //11/03: new
+  tip.textContent = `Length: ${meters.toFixed(1)} m`; //11/03: new
+}
+
+//11/03: move tooltip near cursor
+function moveMeasureTooltip(clientX, clientY) { //11/03: new
+  const tip = ensureMeasureTooltip(); //11/03: new
+  const offset = 16; //11/03: new
+  tip.style.left = `${clientX + offset}px`; //11/03: new
+  tip.style.top  = `${clientY + offset}px`; //11/03: new
+}
+
+//11/03: remove tooltip when done
+function removeMeasureTooltip() { //11/03: new
+  if (_lengthTip && _lengthTip.parentNode) _lengthTip.parentNode.removeChild(_lengthTip); //11/03: new
+  _lengthTip = null; //11/03: new
+}
+
+// ============================================================================
+// Manual Drawing — Hotkeys (ESC/Enter/Backspace/Arrows)
+// ============================================================================
+
+//11/03: robust hotkeys; ESC reliably cancels across browsers
+function attachManualDrawHotkeys(ctx) { //11/03: updated
+  const onKeyDown = (e) => { //11/03: new
+    if (!ctx.active) return; //11/03: keep
+    const key = e.key || ''; //11/03: new
+    const isEsc = key === 'Escape' || key === 'Esc' || e.keyCode === 27; //11/03: new
+    const isBackspace = key === 'Backspace' || e.keyCode === 8; //11/03: new
+    const isEnter = key === 'Enter' || e.keyCode === 13; //11/03: new
+    const isArrow = ['ArrowUp','ArrowDown','ArrowLeft','ArrowRight'].includes(key) ||
+                    [37,38,39,40].includes(e.keyCode); //11/03: new
+
+    // Prevent other handlers (or the browser) from swallowing the event
+    if (isEsc || isBackspace || isEnter || isArrow) { //11/03: new
+      e.preventDefault(); e.stopPropagation(); //11/03: new
+    } //11/03: new
+
+    if (isEsc) { //11/03: changed (supports Escape/Esc/27)
+      // Cancel drawing: remove temp polyline, HUD, listeners, and restore styles
+      try { if (ctx.layer) window._map.removeLayer(ctx.layer); } catch(_){} //11/03: new
+      try { window._map.off('click', ctx._onClick); window._map.off('mousemove', ctx._onMove); } catch(_){} //11/03: new
+      try { if (ctx._restore) ctx._restore.forEach(fn => fn()); } catch(_){} //11/03: new
+      try { removeMeasureTooltip(); } catch(_){} //11/03: new
+      ctx.active = false; //11/03: keep
+      toggleDrawingUI(false); //11/03: keep
+      if (ctx._detachHotkeys) ctx._detachHotkeys(); //11/03: new
+      return; //11/03: new
     }
 
-    // Create polyline draw handler with custom style
-    const drawHandler = new L.Draw.Polyline(window._map, {
-        shapeOptions: { color: '#222', weight: 4, opacity: 1.0 }
-    });
-    drawHandler.enable();
+    if (isEnter) { //11/03: keep
+      if (ctx.layer && ctx.latlngs.length >= 2) {
+        if (ctx._detachHotkeys) ctx._detachHotkeys(); //11/03: new
+        ctx.finish(); //11/03: keep
+      }
+      return; //11/03: new
+    }
 
-    // When drawing is finished
-    window._map.once(L.Draw.Event.CREATED, function (e) {
-        const layer = e.layer;
-        const geojson = layer.toGeoJSON();
-        manualFMRs[index].geometry = geojson.geometry;
+    if (isBackspace) { //11/03: keep
+      if (ctx.latlngs.length > 1) {
+        ctx.latlngs.pop(); //11/03: keep
+        ctx.layer.setLatLngs(ctx.latlngs); //11/03: keep
+        updateMeasureTooltipText(measurePolylineMeters(ctx.latlngs)); //11/03: keep
+      }
+      return; //11/03: new
+    }
 
-        // Add the drawn line to the map
-        layer.addTo(window._map);
+    if (isArrow) { //11/03: keep
+      if (!ctx.latlngs.length) return; //11/03: keep
+      const step = 0.000003; // ~0.3 m-ish //11/03: keep
+      const kc = e.keyCode; //11/03: new
+      let last = ctx.latlngs[ctx.latlngs.length - 1]; //11/03: keep
+      if (key === 'ArrowUp' || kc === 38)    last = L.latLng(last.lat + step, last.lng); //11/03: new
+      if (key === 'ArrowDown' || kc === 40)  last = L.latLng(last.lat - step, last.lng); //11/03: new
+      if (key === 'ArrowLeft' || kc === 37)  last = L.latLng(last.lat, last.lng - step); //11/03: new
+      if (key === 'ArrowRight' || kc === 39) last = L.latLng(last.lat, last.lng + step); //11/03: new
+      ctx.latlngs[ctx.latlngs.length - 1] = last; //11/03: keep
+      ctx.layer.setLatLngs(ctx.latlngs); //11/03: keep
+      updateMeasureTooltipText(measurePolylineMeters(ctx.latlngs)); //11/03: keep
+    }
+  }; //11/03: new
 
-        // 🔹 Restore all FMR lines
-        Object.values(geoLayers).forEach(layer => {
-            window._map.addLayer(layer);
-        });
+  // Listen on document (captures more cases); use capture phase to beat other handlers
+  document.addEventListener('keydown', onKeyDown, true); //11/03: new
 
-        // Show UI back
-        toggleDrawingUI(false);
-    });
+  // Provide a cleanup hook so callers can detach reliably
+  ctx._detachHotkeys = () => { //11/03: new
+    document.removeEventListener('keydown', onKeyDown, true); //11/03: new
+    ctx._detachHotkeys = null; //11/03: new
+  }; //11/03: new
+}
+
+//===========================================================
+// Manual Drawing — Core (drawManualLine)
+// ============================================================================
+
+//11/03: Enhanced manual drawing UX (uses HUD Option B)
+function drawManualLine(index, selectedFmrId) { //11/03: upgraded
+  manualFMRs[index].selectedFmrId = selectedFmrId; //11/03: keep
+  toggleDrawingUI(true); //11/03: keep
+
+  const restoreFns = []; //11/03: new
+  Object.values(geoLayers).forEach(layer => { //11/03: new
+    if (layer.setStyle) { //11/03: new
+      const prev = { ...layer.options }; //11/03: new
+      restoreFns.push(() => { try { layer.setStyle(prev); } catch(e){} }); //11/03: new
+      try { layer.setStyle({ color: '#999', weight: 1, opacity: 0.5 }); } catch(e){} //11/03: new
+    } //11/03: new
+  });
+
+  const latlngs = []; //11/03: new
+  const poly = L.polyline([], { color: '#00d', weight: 3, opacity: 0.95 }).addTo(window._map); //11/03: new
+
+  updateMeasureTooltipText(0); //11/03: new
+
+  const ctx = { //11/03: new
+    layer: poly,
+    latlngs,
+    active: true,
+    _onClick: onClick,
+    _onMove: onMove,
+    _restore: restoreFns,
+    finish: () => { //11/03: new
+      if (latlngs.length < 2) return; //11/03: new
+      const applySmooth = true; //11/03: new
+      const densified = densifyLatLngs(latlngs, 2); //11/03: new
+      const finalLL = applySmooth ? smoothLineChaikin(densified, 1) : densified; //11/03: new
+      poly.setLatLngs(finalLL); //11/03: new
+
+      const coords = finalLL.map(ll => [ll.lng, ll.lat]); //11/03: new
+      manualFMRs[index].geometry = { type: 'LineString', coordinates: coords }; //11/03: new
+
+      updateMeasureTooltipText(measurePolylineMeters(finalLL)); //11/03: new
+      window._map.off('click', onClick); window._map.off('mousemove', onMove); //11/03: new
+      ctx.active = false; //11/03: new
+      restoreFns.forEach(fn => fn()); //11/03: new
+      toggleDrawingUI(false); //11/03: new
+      removeMeasureTooltip(); //11/03: new
+    }
+  }; //11/03: new
+
+  function onClick(e) { //11/03: new
+    latlngs.push(e.latlng); //11/03: new
+    poly.setLatLngs(latlngs); //11/03: new
+    updateMeasureTooltipText(measurePolylineMeters(latlngs)); //11/03: new
+    if (e.originalEvent) moveMeasureTooltip(e.originalEvent.clientX, e.originalEvent.clientY); //11/03: new
+  } //11/03: new
+
+  function onMove(e) { //11/03: new
+    if (!latlngs.length) { if (e.originalEvent) moveMeasureTooltip(e.originalEvent.clientX, e.originalEvent.clientY); return; } //11/03: new
+    const tmp = [...latlngs, e.latlng]; //11/03: new
+    poly.setLatLngs(tmp); //11/03: new
+    updateMeasureTooltipText(measurePolylineMeters(tmp)); //11/03: new
+    if (e.originalEvent) moveMeasureTooltip(e.originalEvent.clientX, e.originalEvent.clientY); //11/03: new
+  } //11/03: new
+
+  window._map.on('click', onClick); //11/03: new
+  window._map.on('mousemove', onMove); //11/03: new
+  attachManualDrawHotkeys(ctx); //11/03: new
 }
 
 function toggleManualSection() {
@@ -785,3 +893,391 @@ function toggleDrawingUI(showMapOnly) {
     const panel = document.getElementById('selection-panel');
     if (panel) panel.style.display = showMapOnly ? 'none' : 'block';
 }
+
+// ============= UPDATE NOTIFICATION SYSTEM =============
+
+let updateCheckInterval = null;
+let hasUpdatesAvailable = false;
+
+// Create update notification element
+function createUpdateNotification() {
+    const notification = document.createElement('div');
+    notification.id = 'update-notification';
+    notification.style.cssText = `
+        position: fixed;
+        top: 10px;
+        right: 10px;
+        background: #ff9800;
+        color: white;
+        padding: 12px 20px;
+        border-radius: 8px;
+        box-shadow: 0 2px 10px rgba(0,0,0,0.3);
+        z-index: 10001;
+        display: none;
+        font-size: 14px;
+        max-width: 300px;
+    `;
+    notification.innerHTML = `
+        <div style="display: flex; align-items: center; gap: 10px;">
+            <i class="fas fa-exclamation-circle"></i>
+            <div>
+                <div style="font-weight: bold;">Updates Available</div>
+                <div id="update-details" style="font-size: 12px; margin-top: 4px;"></div>
+                <button onclick="applyUpdates()" style="
+                    margin-top: 8px;
+                    background: white;
+                    color: #ff9800;
+                    border: none;
+                    padding: 4px 12px;
+                    border-radius: 4px;
+                    cursor: pointer;
+                    font-size: 12px;
+                ">Apply Updates</button>
+            </div>
+        </div>
+    `;
+    document.body.appendChild(notification);
+}
+
+// Check for updates periodically
+function startUpdateChecker() {
+    // Check immediately
+    checkForUpdates();
+    
+    // Then check every 30 seconds
+    updateCheckInterval = setInterval(checkForUpdates, 30000);
+}
+
+function stopUpdateChecker() {
+    if (updateCheckInterval) {
+        clearInterval(updateCheckInterval);
+        updateCheckInterval = null;
+    }
+}
+
+function checkForUpdates() {
+    fetch('/check_updates')
+        .then(res => res.json())
+        .then(data => {
+            const notification = document.getElementById('update-notification');
+            const updateBtn = document.getElementById('refresh-btn');
+            
+            if (data.has_updates) {
+                hasUpdatesAvailable = true;
+                
+                // Show notification
+                if (notification) {
+                    const details = document.getElementById('update-details');
+                    details.textContent = `${data.new_shapefiles} new shapefiles, ${data.new_rasters} new images`;
+                    notification.style.display = 'block';
+                }
+                
+                // Update refresh button
+                if (updateBtn) {
+                    updateBtn.innerHTML = '<i class="fas fa-download"></i> Apply Updates';
+                    updateBtn.style.backgroundColor = '#ff9800';
+                    updateBtn.classList.add('pulse-animation');
+                }
+            } else {
+                hasUpdatesAvailable = false;
+                
+                // Hide notification
+                if (notification) {
+                    notification.style.display = 'none';
+                }
+                
+                // Reset refresh button
+                if (updateBtn) {
+                    updateBtn.innerHTML = '<i class="fas fa-sync-alt"></i> Refresh';
+                    updateBtn.style.backgroundColor = '#4CAF50';
+                    updateBtn.classList.remove('pulse-animation');
+                }
+            }
+        })
+        .catch(err => console.error('Error checking for updates:', err));
+}
+
+// Apply updates (incremental)
+function applyUpdates() {
+    manualRefresh();
+}
+
+// Manual refresh function
+function manualRefresh() {
+    // Show loading state
+    const refreshBtn = document.getElementById('refresh-btn');
+    const originalContent = refreshBtn ? refreshBtn.innerHTML : '';
+    if (refreshBtn) {
+        refreshBtn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Updating...';
+        refreshBtn.disabled = true;
+    }
+    
+    // Hide update notification
+    const notification = document.getElementById('update-notification');
+    if (notification) {
+        notification.style.display = 'none';
+    }
+    
+    fetch('/manual_refresh', { method: 'POST' })
+        .then(res => res.json())
+        .then(data => {
+            if (data.status === 'success') {
+                // Show success message
+                showToast(`✓ Update complete! ${data.message}`, 'success');
+                
+                // Reload page if shapefiles were updated
+                if (data.shapefiles_updated) {
+                    setTimeout(() => {
+                        location.reload();
+                    }, 2000);
+                } else if (data.new_database_entries > 0) {
+                    // Just refresh the FMR list if only database was updated
+                    updateFMRList();
+                }
+                
+                // Reset button
+                if (refreshBtn) {
+                    refreshBtn.innerHTML = '<i class="fas fa-sync-alt"></i> Refresh';
+                    refreshBtn.disabled = false;
+                    refreshBtn.style.backgroundColor = '#4CAF50';
+                }
+            } else {
+                showToast('Update failed: ' + (data.message || 'Unknown error'), 'error');
+                if (refreshBtn) {
+                    refreshBtn.innerHTML = originalContent;
+                    refreshBtn.disabled = false;
+                }
+            }
+        })
+        .catch(err => {
+            console.error('Error during refresh:', err);
+            showToast('Update failed: ' + err.message, 'error');
+            if (refreshBtn) {
+                refreshBtn.innerHTML = originalContent;
+                refreshBtn.disabled = false;
+            }
+        });
+}
+
+// Full rebuild (for troubleshooting)
+function fullRebuild() {
+    if (!confirm('This will completely rebuild the database. This may take several minutes. Continue?')) {
+        return;
+    }
+    
+    showToast('Starting full database rebuild...', 'info');
+    
+    fetch('/full_rebuild', { method: 'POST' })
+        .then(res => res.json())
+        .then(data => {
+            if (data.status === 'success') {
+                showToast('✓ Full rebuild complete!', 'success');
+                setTimeout(() => location.reload(), 2000);
+            } else {
+                showToast('Rebuild failed: ' + data.message, 'error');
+            }
+        })
+        .catch(err => {
+            console.error('Error during rebuild:', err);
+            showToast('Rebuild failed: ' + err.message, 'error');
+        });
+}
+
+// Toast notification system
+function showToast(message, type = 'info') {
+    const toast = document.createElement('div');
+    toast.className = 'toast-notification';
+    
+    const colors = {
+        'success': '#4CAF50',
+        'error': '#f44336',
+        'warning': '#ff9800',
+        'info': '#2196F3'
+    };
+    
+    toast.style.cssText = `
+        position: fixed;
+        bottom: 20px;
+        left: 50%;
+        transform: translateX(-50%);
+        background: ${colors[type]};
+        color: white;
+        padding: 12px 24px;
+        border-radius: 8px;
+        box-shadow: 0 4px 12px rgba(0,0,0,0.3);
+        z-index: 10002;
+        font-size: 14px;
+        animation: slideUp 0.3s ease-out;
+    `;
+    
+    toast.textContent = message;
+    document.body.appendChild(toast);
+    
+    setTimeout(() => {
+        toast.style.animation = 'fadeOut 0.3s ease-out';
+        setTimeout(() => toast.remove(), 300);
+    }, 3000);
+}
+
+// Add CSS animations
+const animationStyles = document.createElement('style');
+animationStyles.textContent = `
+    @keyframes slideUp {
+        from {
+            transform: translate(-50%, 100%);
+            opacity: 0;
+        }
+        to {
+            transform: translate(-50%, 0);
+            opacity: 1;
+        }
+    }
+    
+    @keyframes fadeOut {
+        from {
+            opacity: 1;
+        }
+        to {
+            opacity: 0;
+        }
+    }
+    
+    @keyframes pulse {
+        0% { opacity: 1; }
+        50% { opacity: 0.6; }
+        100% { opacity: 1; }
+    }
+    
+    .pulse-animation {
+        animation: pulse 2s infinite;
+    }
+    
+    #database-stats {
+        position: fixed;
+        top: 10px;
+        left: 10px;
+        background: rgba(255, 255, 255, 0.95);
+        padding: 10px 15px;
+        border-radius: 8px;
+        box-shadow: 0 2px 6px rgba(0,0,0,0.2);
+        z-index: 1000;
+        font-size: 12px;
+    }
+    
+    #database-stats h4 {
+        margin: 0 0 8px 0;
+        font-size: 14px;
+    }
+    
+    #database-stats div {
+        margin: 4px 0;
+    }
+    
+    .refresh-controls {
+        display: flex;
+        gap: 8px;
+        align-items: center;
+        margin-top: 10px;
+    }
+    
+    .refresh-btn {
+        background: #4CAF50;
+        color: white;
+        border: none;
+        padding: 6px 12px;
+        border-radius: 4px;
+        cursor: pointer;
+        font-size: 12px;
+        display: flex;
+        align-items: center;
+        gap: 6px;
+    }
+    
+    .refresh-btn:hover {
+        opacity: 0.9;
+    }
+    
+    .refresh-btn:disabled {
+        opacity: 0.5;
+        cursor: not-allowed;
+    }
+    
+    .rebuild-btn {
+        background: #666;
+        color: white;
+        border: none;
+        padding: 4px 8px;
+        border-radius: 4px;
+        cursor: pointer;
+        font-size: 11px;
+    }
+`;
+document.head.appendChild(animationStyles);
+
+// Initialize update checker on page load
+document.addEventListener('DOMContentLoaded', function() {
+    // Create update notification
+    createUpdateNotification();
+    
+    // Add database stats panel
+    createDatabaseStats();
+    
+    // Start checking for updates
+    startUpdateChecker();
+    
+    // Load initial stats
+    loadDatabaseStats();
+});
+
+// Create database stats panel
+function createDatabaseStats() {
+    const statsPanel = document.createElement('div');
+    statsPanel.id = 'database-stats';
+    statsPanel.innerHTML = `
+        <h4>📊 Database Status</h4>
+        <div id="stats-content">
+            <div>FMRs: <span id="stat-fmrs">-</span></div>
+            <div>Entries: <span id="stat-entries">-</span></div>
+            <div>Last Update: <span id="stat-update">-</span></div>
+        </div>
+        <div class="refresh-controls">
+            <button id="refresh-btn" class="refresh-btn" onclick="manualRefresh()">
+                <i class="fas fa-sync-alt"></i> Refresh
+            </button>
+            <button class="rebuild-btn" onclick="fullRebuild()" title="Full Rebuild">
+                <i class="fas fa-hammer"></i>
+            </button>
+        </div>
+    `;
+    document.body.appendChild(statsPanel);
+}
+
+// Load database statistics
+function loadDatabaseStats() {
+    fetch('/get_update_stats')
+        .then(res => res.json())
+        .then(data => {
+            document.getElementById('stat-fmrs').textContent = data.total_fmrs || '0';
+            document.getElementById('stat-entries').textContent = data.database_entries || '0';
+            document.getElementById('stat-update').textContent = data.last_update || 'Never';
+        })
+        .catch(err => console.error('Error loading stats:', err));
+}
+
+// Update stats after refresh
+function updateStatsAfterRefresh() {
+    loadDatabaseStats();
+}
+
+// Override the existing clearSelections to stop update checker during processing
+const originalClearSelections = clearSelections;
+clearSelections = function() {
+    // Stop checking for updates while processing
+    stopUpdateChecker();
+    
+    // Call original function
+    originalClearSelections();
+    
+    // Restart checker after a delay
+    setTimeout(() => startUpdateChecker(), 5000);
+};
