@@ -1,3 +1,4 @@
+// 11/05: Fixed the hotkeys as well as the banner
 
 const selectedIds = new Set();
 const geoLayers = {};
@@ -764,12 +765,16 @@ function attachManualDrawHotkeys(ctx) { //11/03: updated
       try { removeMeasureTooltip(); } catch(_){} //11/03: new
       ctx.active = false; //11/03: keep
       toggleDrawingUI(false); //11/03: keep
+      hideManualBanner(); //11/05: new
       if (ctx._detachHotkeys) ctx._detachHotkeys(); //11/03: new
+      setManualCursor(false); //11/05
       return; //11/03: new
     }
 
     if (isEnter) { //11/03: keep
       if (ctx.layer && ctx.latlngs.length >= 2) {
+        hideManualBanner(); //11/05: new
+        setManualCursor(false);
         if (ctx._detachHotkeys) ctx._detachHotkeys(); //11/03: new
         ctx.finish(); //11/03: keep
       }
@@ -810,30 +815,54 @@ function attachManualDrawHotkeys(ctx) { //11/03: updated
   }; //11/03: new
 }
 
+// ============================================================================
+// Manual Drawing — Banner (instructions ribbon)
+// ============================================================================
+
+// 11/03: create/destroy a slim banner with instructions
+function showManualBanner() { // 11/03: new
+  if (document.getElementById('manual-banner')) return; // 11/03: new
+  const b = document.createElement('div'); // 11/03: new
+  b.id = 'manual-banner'; // 11/03: new
+  b.style.position = 'fixed'; b.style.left = 0; b.style.right = 0; b.style.top = 0; // 11/03: new
+  b.style.zIndex = 9998; b.style.textAlign = 'center'; // 11/03: new
+  b.style.background = 'rgba(17,17,17,0.9)'; b.style.color = '#fff'; // 11/03: new
+  b.style.borderTop = '2px solid #4ade80'; b.style.borderBottom = '2px solid #4ade80'; // 11/03: new
+  b.style.padding = '6px 10px'; b.style.font = '12px/1.2 sans-serif'; // 11/03: new
+  b.textContent = ' · Manual mode: Click to add points · Enter = finish · ESC = cancel · Backspace = undo · '; // 11/03: new
+  document.body.appendChild(b); // 11/03: new
+}
+
+function hideManualBanner() { // 11/03: new
+  const b = document.getElementById('manual-banner'); // 11/03: new
+  if (b && b.parentNode) b.parentNode.removeChild(b); // 11/03: new
+}
+
 //===========================================================
 // Manual Drawing — Core (drawManualLine)
 // ============================================================================
 
 //11/03: Enhanced manual drawing UX (uses HUD Option B)
 function drawManualLine(index, selectedFmrId) { //11/03: upgraded
-  manualFMRs[index].selectedFmrId = selectedFmrId; //11/03: keep
-  toggleDrawingUI(true); //11/03: keep
-
-  const restoreFns = []; //11/03: new
-  Object.values(geoLayers).forEach(layer => { //11/03: new
+    manualFMRs[index].selectedFmrId = selectedFmrId; //11/03: keep
+    toggleDrawingUI(true); //11/03: keep
+    showManualBanner(); //11/05: new
+    setManualCursor(true); //11/05: new    
+    const restoreFns = []; //11/03: new
+    Object.values(geoLayers).forEach(layer => { //11/03: new
     if (layer.setStyle) { //11/03: new
-      const prev = { ...layer.options }; //11/03: new
-      restoreFns.push(() => { try { layer.setStyle(prev); } catch(e){} }); //11/03: new
-      try { layer.setStyle({ color: '#999', weight: 1, opacity: 0.5 }); } catch(e){} //11/03: new
+        const prev = { ...layer.options }; //11/03: new
+        restoreFns.push(() => { try { layer.setStyle(prev); } catch(e){} }); //11/03: new
+        try { layer.setStyle({ color: '#999', weight: 1, opacity: 0.5 }); } catch(e){} //11/03: new
     } //11/03: new
-  });
+    });
 
-  const latlngs = []; //11/03: new
-  const poly = L.polyline([], { color: '#00d', weight: 3, opacity: 0.95 }).addTo(window._map); //11/03: new
+    const latlngs = []; //11/03: new
+    const poly = L.polyline([], { color: '#00d', weight: 3, opacity: 0.95 }).addTo(window._map); //11/03: new
 
-  updateMeasureTooltipText(0); //11/03: new
+    updateMeasureTooltipText(0); //11/03: new
 
-  const ctx = { //11/03: new
+    const ctx = { //11/03: new
     layer: poly,
     latlngs,
     active: true,
@@ -841,21 +870,22 @@ function drawManualLine(index, selectedFmrId) { //11/03: upgraded
     _onMove: onMove,
     _restore: restoreFns,
     finish: () => { //11/03: new
-      if (latlngs.length < 2) return; //11/03: new
-      const applySmooth = true; //11/03: new
-      const densified = densifyLatLngs(latlngs, 2); //11/03: new
-      const finalLL = applySmooth ? smoothLineChaikin(densified, 1) : densified; //11/03: new
-      poly.setLatLngs(finalLL); //11/03: new
+        if (latlngs.length < 2) return; //11/03: new
+        const applySmooth = true; //11/03: new
+        const densified = densifyLatLngs(latlngs, 2); //11/03: new
+        const finalLL = applySmooth ? smoothLineChaikin(densified, 1) : densified; //11/03: new
+        poly.setLatLngs(finalLL); //11/03: new
 
-      const coords = finalLL.map(ll => [ll.lng, ll.lat]); //11/03: new
-      manualFMRs[index].geometry = { type: 'LineString', coordinates: coords }; //11/03: new
+        const coords = finalLL.map(ll => [ll.lng, ll.lat]); //11/03: new
+        manualFMRs[index].geometry = { type: 'LineString', coordinates: coords }; //11/03: new
 
-      updateMeasureTooltipText(measurePolylineMeters(finalLL)); //11/03: new
-      window._map.off('click', onClick); window._map.off('mousemove', onMove); //11/03: new
-      ctx.active = false; //11/03: new
-      restoreFns.forEach(fn => fn()); //11/03: new
-      toggleDrawingUI(false); //11/03: new
-      removeMeasureTooltip(); //11/03: new
+        updateMeasureTooltipText(measurePolylineMeters(finalLL)); //11/03: new
+        window._map.off('click', onClick); window._map.off('mousemove', onMove); //11/03: new
+        ctx.active = false; //11/03: new
+        restoreFns.forEach(fn => fn()); //11/03: new
+        toggleDrawingUI(false); //11/03: new
+        removeMeasureTooltip(); //11/03: new
+        hideMannualBanner(); //11/05
     }
   }; //11/03: new
 
@@ -892,6 +922,23 @@ function toggleDrawingUI(showMapOnly) {
     // Hide or show the selection panel
     const panel = document.getElementById('selection-panel');
     if (panel) panel.style.display = showMapOnly ? 'none' : 'block';
+}
+
+// ============================================================================
+// Manual Drawing — Cursor helpers
+// ============================================================================
+
+//11/05: toggle crosshair cursor on the Leaflet map container
+function setManualCursor(on = true){
+    const map = window._map;
+    const el = map && map.getContainer ? map.getContainer() : null;
+    if (!el) return; 
+    if (on){
+        if (!el.dataset.prevCursor) el.dataset.prevCursor = el.style.cursor || '';  
+        el.style.cursor = 'crosshair';
+    } else {
+        el.style.cursor = el.dataset.prevCursor || '';
+    }
 }
 
 // ============= UPDATE NOTIFICATION SYSTEM =============
