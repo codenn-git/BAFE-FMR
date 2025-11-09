@@ -595,7 +595,8 @@ function toggleImageVisibility(button) {
         console.log("Restored all FMRs.");
     }
 }
- // 8/13: modified manual FMR drawing logic
+
+// 8/13: modified manual FMR drawing logic
 function addManualFMRRow() {
     const index = manualFMRCounter++;
 
