@@ -68,15 +68,11 @@ def process_fmr():  #11/07
          3) Update CSV: overwrite last row when status == 'On-going', else append.
        Automatic: unchanged, uses existing processing().
     """  #11/07
-    from datetime import datetime  #11/07
-    import pandas as pd            #11/07
-    import geopandas as gpd        #11/07
-    from shapely.geometry import shape  #11/07
-    import os                      #11/07
+    #aina: dinelete ko lang yung redundant imports
 
     #11/07: shared output targets (match automatic)
-    GEOJSON_OUTPUT = r"C:\Users\user-307E123400\OneDrive - Philippine Space Agency\SDMAD_SHARED\PROJECTS\SAKA\FMR\GUI\Outputs"  #11/07
-    OUTPUT_BASE    = r"C:\Users\user-307E123400\OneDrive - Philippine Space Agency\SDMAD_SHARED\PROJECTS\SAKA\FMR\GUI\Outputs\manual"  #11/07
+    GEOJSON_OUTPUT = os.path.join(os.path.dirname(bsg_folder), "Outputs") #11/07; 11/10
+    OUTPUT_BASE    = os.path.join(GEOJSON_OUTPUT, "manual") #11/07; 11/10, inayos ko lang para yung mga paths lang sa taas yung need i-edit
     CENTERLINES_GEOJSON = os.path.join(GEOJSON_OUTPUT, "fmr_centerlines.geojson")  #11/07
     POLYGONS_GEOJSON    = os.path.join(GEOJSON_OUTPUT, "fmr_polygons.geojson")     #11/07
 
