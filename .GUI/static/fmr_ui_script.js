@@ -132,6 +132,7 @@ document.addEventListener('change', function (e) {
     }
 });
 
+
 function selectedFMRList() {
     return Array.from(selectedIds);
 }
@@ -596,7 +597,8 @@ function toggleImageVisibility(button) {
         console.log("Restored all FMRs.");
     }
 }
- // 8/13: modified manual FMR drawing logic
+
+// 8/13: modified manual FMR drawing logic
 function addManualFMRRow() {
     const index = manualFMRCounter++;
 
@@ -648,57 +650,266 @@ function removeManualFMRRow(index) {
     manualFMRs = manualFMRs.filter(f => f.id !== index);
 }
 
-// 8/13: Changes
-function drawManualLine(index, selectedFmrId) {
-    manualFMRs[index].selectedFmrId = selectedFmrId;
+// ============================================================================
+// Manual Drawing — Shared Helpers
+// ============================================================================
 
-    // Hide UI, keep map only
-    toggleDrawingUI(true);
+//11/03: lightweight Chaikin smoothing helper (shared)
+function smoothLineChaikin(latlngs, iterations = 1) { //11/03: new
+  let pts = latlngs.map(ll => [ll.lat, ll.lng]); //11/03: new
+  for (let it = 0; it < iterations; it++) { //11/03: new
+    const out = []; //11/03: new
+    for (let i = 0; i < pts.length - 1; i++) { //11/03: new
+      const [x0, y0] = pts[i], [x1, y1] = pts[i+1]; //11/03: new
+      out.push([0.75*x0 + 0.25*x1, 0.75*y0 + 0.25*y1]); //11/03: new
+      out.push([0.25*x0 + 0.75*x1, 0.25*y0 + 0.75*y1]); //11/03: new
+    } //11/03: new
+    pts = [pts[0], ...out, pts[pts.length - 1]]; //11/03: new
+  } //11/03: new
+  return pts.map(p => L.latLng(p[0], p[1])); //11/03: new
+}
 
-    // 🔹 Hide all FMR lines while drawing
-    Object.values(geoLayers).forEach(layer => {
-        window._map.removeLayer(layer);
-    });
+//11/03: measure polyline length in meters (shared)
+function measurePolylineMeters(latlngs) { //11/03: new
+  if (!window._map || latlngs.length < 2) return 0; //11/03: new
+  let m = 0; //11/03: new
+  for (let i = 0; i < latlngs.length - 1; i++) { //11/03: new
+    m += window._map.distance(latlngs[i], latlngs[i+1]); //11/03: new
+  } //11/03: new
+  return m; //11/03: new
+}
 
-    // Initialize draw control if not yet done
-    if (!window._drawControl) {
-        window._drawControl = new L.Control.Draw({
-            draw: {
-                polygon: false,
-                marker: false,
-                circle: false,
-                rectangle: false,
-                circlemarker: false,
-                polyline: { shapeOptions: { color: '#222', weight: 4, opacity: 1.0 } }
-            },
-            edit: false
-        });
-        window._map.addControl(window._drawControl);
+//11/03: light client-side densify for nicer preview (shared)
+function densifyLatLngs(latlngs, stepMeters = 2) { //11/03: new
+  const out = []; //11/03: new
+  for (let i = 0; i < latlngs.length - 1; i++) { //11/03: new
+    const a = latlngs[i], b = latlngs[i+1]; //11/03: new
+    out.push(a); //11/03: new
+    const seg = window._map.distance(a, b); //11/03: new
+    const n = Math.max(0, Math.floor(seg / stepMeters) - 1); //11/03: new
+    for (let k = 1; k <= n; k++) { //11/03: new
+      const t = k / (n + 1); //11/03: new
+      out.push(L.latLng(a.lat + t*(b.lat - a.lat), a.lng + t*(b.lng - a.lng))); //11/03: new
+    } //11/03: new
+  } //11/03: new
+  out.push(latlngs[latlngs.length - 1]); //11/03: new
+  return out; //11/03: new
+}
+
+// ============================================================================
+// Manual Drawing — HUD (QoL: Cursor-Following Tooltip)
+// ============================================================================
+
+let _lengthTip = null; //11/03: new
+
+//11/03: create/ensure a floating tooltip near the cursor
+function ensureMeasureTooltip() { //11/03: new
+  if (_lengthTip) return _lengthTip; //11/03: new
+  _lengthTip = document.createElement('div'); //11/03: new
+  _lengthTip.id = 'draw-length-tip'; //11/03: new
+  _lengthTip.style.position = 'fixed'; //11/03: new
+  _lengthTip.style.zIndex = 9999; _lengthTip.style.pointerEvents = 'none'; //11/03: new
+  _lengthTip.style.left = '0px'; _lengthTip.style.top = '0px'; //11/03: new
+  _lengthTip.style.padding = '6px 10px'; //11/03: new
+  _lengthTip.style.background = 'rgba(0,0,0,0.65)'; _lengthTip.style.color = '#fff'; //11/03: new
+  _lengthTip.style.borderRadius = '6px'; _lengthTip.style.font = '12px/1.2 sans-serif'; //11/03: new
+  _lengthTip.style.borderTop = '2px solid #4ade80'; //11/03: new
+  _lengthTip.style.borderBottom = '2px solid #4ade80'; //11/03: new
+  _lengthTip.textContent = 'Length: 0 m'; //11/03: new
+  document.body.appendChild(_lengthTip); //11/03: new
+  return _lengthTip; //11/03: new
+}
+
+//11/03: update text in tooltip
+function updateMeasureTooltipText(meters) { //11/03: new
+  const tip = ensureMeasureTooltip(); //11/03: new
+  tip.textContent = `Length: ${meters.toFixed(1)} m`; //11/03: new
+}
+
+//11/03: move tooltip near cursor
+function moveMeasureTooltip(clientX, clientY) { //11/03: new
+  const tip = ensureMeasureTooltip(); //11/03: new
+  const offset = 16; //11/03: new
+  tip.style.left = `${clientX + offset}px`; //11/03: new
+  tip.style.top  = `${clientY + offset}px`; //11/03: new
+}
+
+//11/03: remove tooltip when done
+function removeMeasureTooltip() { //11/03: new
+  if (_lengthTip && _lengthTip.parentNode) _lengthTip.parentNode.removeChild(_lengthTip); //11/03: new
+  _lengthTip = null; //11/03: new
+}
+
+// ============================================================================
+// Manual Drawing — Hotkeys (ESC/Enter/Backspace/Arrows)
+// ============================================================================
+
+//11/03: robust hotkeys; ESC reliably cancels across browsers
+function attachManualDrawHotkeys(ctx) { //11/03: updated
+  const onKeyDown = (e) => { //11/03: new
+    if (!ctx.active) return; //11/03: keep
+    const key = e.key || ''; //11/03: new
+    const isEsc = key === 'Escape' || key === 'Esc' || e.keyCode === 27; //11/03: new
+    const isBackspace = key === 'Backspace' || e.keyCode === 8; //11/03: new
+    const isEnter = key === 'Enter' || e.keyCode === 13; //11/03: new
+    const isArrow = ['ArrowUp','ArrowDown','ArrowLeft','ArrowRight'].includes(key) ||
+                    [37,38,39,40].includes(e.keyCode); //11/03: new
+
+    // Prevent other handlers (or the browser) from swallowing the event
+    if (isEsc || isBackspace || isEnter || isArrow) { //11/03: new
+      e.preventDefault(); e.stopPropagation(); //11/03: new
+    } //11/03: new
+
+    if (isEsc) { //11/03: changed (supports Escape/Esc/27)
+      // Cancel drawing: remove temp polyline, HUD, listeners, and restore styles
+      try { if (ctx.layer) window._map.removeLayer(ctx.layer); } catch(_){} //11/03: new
+      try { window._map.off('click', ctx._onClick); window._map.off('mousemove', ctx._onMove); } catch(_){} //11/03: new
+      try { if (ctx._restore) ctx._restore.forEach(fn => fn()); } catch(_){} //11/03: new
+      try { removeMeasureTooltip(); } catch(_){} //11/03: new
+      ctx.active = false; //11/03: keep
+      toggleDrawingUI(false); //11/03: keep
+      hideManualBanner(); //11/05: new
+      if (ctx._detachHotkeys) ctx._detachHotkeys(); //11/03: new
+      setManualCursor(false); //11/05
+      return; //11/03: new
     }
 
-    // Create polyline draw handler with custom style
-    const drawHandler = new L.Draw.Polyline(window._map, {
-        shapeOptions: { color: '#222', weight: 4, opacity: 1.0 }
+    if (isEnter) { //11/03: keep
+      if (ctx.layer && ctx.latlngs.length >= 2) {
+        hideManualBanner(); //11/05: new
+        setManualCursor(false);
+        if (ctx._detachHotkeys) ctx._detachHotkeys(); //11/03: new
+        ctx.finish(); //11/03: keep
+      }
+      return; //11/03: new
+    }
+
+    if (isBackspace) { //11/03: keep
+      if (ctx.latlngs.length > 1) {
+        ctx.latlngs.pop(); //11/03: keep
+        ctx.layer.setLatLngs(ctx.latlngs); //11/03: keep
+        updateMeasureTooltipText(measurePolylineMeters(ctx.latlngs)); //11/03: keep
+      }
+      return; //11/03: new
+    }
+
+    if (isArrow) { //11/03: keep
+      if (!ctx.latlngs.length) return; //11/03: keep
+      const step = 0.000003; // ~0.3 m-ish //11/03: keep
+      const kc = e.keyCode; //11/03: new
+      let last = ctx.latlngs[ctx.latlngs.length - 1]; //11/03: keep
+      if (key === 'ArrowUp' || kc === 38)    last = L.latLng(last.lat + step, last.lng); //11/03: new
+      if (key === 'ArrowDown' || kc === 40)  last = L.latLng(last.lat - step, last.lng); //11/03: new
+      if (key === 'ArrowLeft' || kc === 37)  last = L.latLng(last.lat, last.lng - step); //11/03: new
+      if (key === 'ArrowRight' || kc === 39) last = L.latLng(last.lat, last.lng + step); //11/03: new
+      ctx.latlngs[ctx.latlngs.length - 1] = last; //11/03: keep
+      ctx.layer.setLatLngs(ctx.latlngs); //11/03: keep
+      updateMeasureTooltipText(measurePolylineMeters(ctx.latlngs)); //11/03: keep
+    }
+  }; //11/03: new
+
+  // Listen on document (captures more cases); use capture phase to beat other handlers
+  document.addEventListener('keydown', onKeyDown, true); //11/03: new
+
+  // Provide a cleanup hook so callers can detach reliably
+  ctx._detachHotkeys = () => { //11/03: new
+    document.removeEventListener('keydown', onKeyDown, true); //11/03: new
+    ctx._detachHotkeys = null; //11/03: new
+  }; //11/03: new
+}
+
+// ============================================================================
+// Manual Drawing — Banner (instructions ribbon)
+// ============================================================================
+
+// 11/03: create/destroy a slim banner with instructions
+function showManualBanner() { // 11/03: new
+  if (document.getElementById('manual-banner')) return; // 11/03: new
+  const b = document.createElement('div'); // 11/03: new
+  b.id = 'manual-banner'; // 11/03: new
+  b.style.position = 'fixed'; b.style.left = 0; b.style.right = 0; b.style.top = 0; // 11/03: new
+  b.style.zIndex = 9998; b.style.textAlign = 'center'; // 11/03: new
+  b.style.background = 'rgba(17,17,17,0.9)'; b.style.color = '#fff'; // 11/03: new
+  b.style.borderTop = '2px solid #4ade80'; b.style.borderBottom = '2px solid #4ade80'; // 11/03: new
+  b.style.padding = '6px 10px'; b.style.font = '12px/1.2 sans-serif'; // 11/03: new
+  b.textContent = ' · Manual mode: Click to add points · Enter = finish · ESC = cancel · Backspace = undo · '; // 11/03: new
+  document.body.appendChild(b); // 11/03: new
+}
+
+function hideManualBanner() { // 11/03: new
+  const b = document.getElementById('manual-banner'); // 11/03: new
+  if (b && b.parentNode) b.parentNode.removeChild(b); // 11/03: new
+}
+
+//===========================================================
+// Manual Drawing — Core (drawManualLine)
+// ============================================================================
+
+//11/03: Enhanced manual drawing UX (uses HUD Option B)
+function drawManualLine(index, selectedFmrId) { //11/03: upgraded
+    manualFMRs[index].selectedFmrId = selectedFmrId; //11/03: keep
+    toggleDrawingUI(true); //11/03: keep
+    showManualBanner(); //11/05: new
+    setManualCursor(true); //11/05: new    
+    const restoreFns = []; //11/03: new
+    Object.values(geoLayers).forEach(layer => { //11/03: new
+    if (layer.setStyle) { //11/03: new
+        const prev = { ...layer.options }; //11/03: new
+        restoreFns.push(() => { try { layer.setStyle(prev); } catch(e){} }); //11/03: new
+        try { layer.setStyle({ color: '#999', weight: 1, opacity: 0.5 }); } catch(e){} //11/03: new
+    } //11/03: new
     });
-    drawHandler.enable();
 
-    // When drawing is finished
-    window._map.once(L.Draw.Event.CREATED, function (e) {
-        const layer = e.layer;
-        const geojson = layer.toGeoJSON();
-        manualFMRs[index].geometry = geojson.geometry;
+    const latlngs = []; //11/03: new
+    const poly = L.polyline([], { color: '#00d', weight: 3, opacity: 0.95 }).addTo(window._map); //11/03: new
 
-        // Add the drawn line to the map
-        layer.addTo(window._map);
+    updateMeasureTooltipText(0); //11/03: new
 
-        // 🔹 Restore all FMR lines
-        Object.values(geoLayers).forEach(layer => {
-            window._map.addLayer(layer);
-        });
+    const ctx = { //11/03: new
+    layer: poly,
+    latlngs,
+    active: true,
+    _onClick: onClick,
+    _onMove: onMove,
+    _restore: restoreFns,
+    finish: () => { //11/03: new
+        if (latlngs.length < 2) return; //11/03: new
+        const applySmooth = true; //11/03: new
+        const densified = densifyLatLngs(latlngs, 2); //11/03: new
+        const finalLL = applySmooth ? smoothLineChaikin(densified, 1) : densified; //11/03: new
+        poly.setLatLngs(finalLL); //11/03: new
 
-        // Show UI back
-        toggleDrawingUI(false);
-    });
+        const coords = finalLL.map(ll => [ll.lng, ll.lat]); //11/03: new
+        manualFMRs[index].geometry = { type: 'LineString', coordinates: coords }; //11/03: new
+
+        updateMeasureTooltipText(measurePolylineMeters(finalLL)); //11/03: new
+        window._map.off('click', onClick); window._map.off('mousemove', onMove); //11/03: new
+        ctx.active = false; //11/03: new
+        restoreFns.forEach(fn => fn()); //11/03: new
+        toggleDrawingUI(false); //11/03: new
+        removeMeasureTooltip(); //11/03: new
+        hideMannualBanner(); //11/05
+    }
+  }; //11/03: new
+
+  function onClick(e) { //11/03: new
+    latlngs.push(e.latlng); //11/03: new
+    poly.setLatLngs(latlngs); //11/03: new
+    updateMeasureTooltipText(measurePolylineMeters(latlngs)); //11/03: new
+    if (e.originalEvent) moveMeasureTooltip(e.originalEvent.clientX, e.originalEvent.clientY); //11/03: new
+  } //11/03: new
+
+  function onMove(e) { //11/03: new
+    if (!latlngs.length) { if (e.originalEvent) moveMeasureTooltip(e.originalEvent.clientX, e.originalEvent.clientY); return; } //11/03: new
+    const tmp = [...latlngs, e.latlng]; //11/03: new
+    poly.setLatLngs(tmp); //11/03: new
+    updateMeasureTooltipText(measurePolylineMeters(tmp)); //11/03: new
+    if (e.originalEvent) moveMeasureTooltip(e.originalEvent.clientX, e.originalEvent.clientY); //11/03: new
+  } //11/03: new
+
+  window._map.on('click', onClick); //11/03: new
+  window._map.on('mousemove', onMove); //11/03: new
+  attachManualDrawHotkeys(ctx); //11/03: new
 }
 
 function toggleManualSection() {
@@ -714,6 +925,23 @@ function toggleDrawingUI(showMapOnly) {
     // Hide or show the selection panel
     const panel = document.getElementById('selection-panel');
     if (panel) panel.style.display = showMapOnly ? 'none' : 'block';
+}
+
+// ============================================================================
+// Manual Drawing — Cursor helpers
+// ============================================================================
+
+//11/05: toggle crosshair cursor on the Leaflet map container
+function setManualCursor(on = true){
+    const map = window._map;
+    const el = map && map.getContainer ? map.getContainer() : null;
+    if (!el) return; 
+    if (on){
+        if (!el.dataset.prevCursor) el.dataset.prevCursor = el.style.cursor || '';  
+        el.style.cursor = 'crosshair';
+    } else {
+        el.style.cursor = el.dataset.prevCursor || '';
+    }
 }
 
 // ============= UPDATE NOTIFICATION SYSTEM =============
