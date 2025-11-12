@@ -55,8 +55,6 @@ filtered_gdf = gdf.copy()
 # ==========================================================
 # Processing Functions
 # ============================================================================
-# process_fmr — Manual: GeoJSON + CSV (no default width), Automatic unchanged
-# ============================================================================
 
 #11/07: manual branch saves centerline (always) + polygon (only if width given), and updates CSV
 @app.route('/process_fmr', methods=['POST'])
@@ -71,13 +69,10 @@ def process_fmr():  #11/07; #Need to add Width Margin of Error
 
     #11/07: shared output targets (match automatic)
     GEOJSON_OUTPUT = os.path.join(os.path.dirname(bsg_folder), "Outputs")  #11/07
-    OUTPUT_BASE    = os.path.join(GEOJSON_OUTPUT, "manual") #11/07
-    CENTERLINES_GEOJSON = os.path.join(GEOJSON_OUTPUT, "fmr_centerlines_aina.geojson")  #11/07
-    POLYGONS_GEOJSON    = os.path.join(GEOJSON_OUTPUT, "fmr_polygons_aina.geojson")     #11/07
 
     data = request.json  #11/07
     workflow_type = data.get("workflow_type")             # 'manual' or 'automatic'  #11/07
-    image_type = data.get("image_type")                   # optional label  #11/07
+    image_type = data.get("image_type")                   # #11/07, 11/12 will remove this part (in both .py and .js since automatic image detection is implemented)
     fmr_id = data.get("fmr_id")                           # automatic  #11/07
     image_path = data.get("image_path")                   # automatic (or later use)  #11/07
     manual_fmr = data.get("manual_fmr")                   # manual  #11/07
@@ -93,7 +88,7 @@ def process_fmr():  #11/07; #Need to add Width Margin of Error
         def _ensure_csv_columns(df):  #11/07
             cols = [
                 "FMR", "Current FMR Length", "FMR Progress", "FMR Status",
-                "Mean FMR Width", "Image Type", "Processing Type", "TIMESTAMP", "Output_Paths"
+                "Mean FMR Width", 'FMR Width ME' "Image Type", "Processing Type", "TIMESTAMP", "Output_Paths"
             ]
             for c in cols:
                 if c not in df.columns:
@@ -150,7 +145,7 @@ def process_fmr():  #11/07; #Need to add Width Margin of Error
             
             # Update CSV database
             if processing_result.get("status") == "success":
-                fmr_db_file = os.path.join(os.path.dirname(shapefile_path), "fmr_database_migo.csv")
+                fmr_db_file = os.path.join(os.path.dirname(shapefile_path), "fmr_database_aina.csv")
                 if os.path.exists(fmr_db_file):
                     try:
                         df = pd.read_csv(fmr_db_file)
@@ -159,7 +154,8 @@ def process_fmr():  #11/07; #Need to add Width Margin of Error
                         results = processing_result.get("results", {})
                         output_paths = processing_result.get("output_paths", {})
                         
-                        mask = (df["FMR"] == fmr_name)
+                        mask = (df["FMR"] == fmr_name) & (df["Image Path"] == image_path)
+                        #11/12 this mask should update based on image_path as to consider fmrs with multiple images (rows) [11/12 - DONE]
                         
                         csv_updates = {
                             "Current FMR Length": results.get("manual_length_m"),
@@ -298,7 +294,7 @@ def process_fmr():  #11/07; #Need to add Width Margin of Error
         return jsonify({"status": "error", "message": f"Processing failed: {str(e)}"}), 500  #11/07
 
 # ==========================================================
-# Original Flask Routes
+# Database (CSV)
 # ==========================================================
 
 def getDatabase():

@@ -250,8 +250,6 @@ class ManualRoadProcessor:
             centerline_shp = os.path.join(self.output_folder, f"{self.fmr_name}_centerline.shp")
             export(self.manual_centerline_metric, centerline_shp, 'vector', 'EPSG:32651')
 
-            print(f"[{self.fmr_name}] Road Length: {manual_length:.1f}m, Progress: {progress_percent:.1f}%")
-
         else:
             print(f"[{self.fmr_name}] Warning: No centerline drawn")
             self.results['manual_length_m'] = float(self.manual_centerline_metric.length.iloc[0])
