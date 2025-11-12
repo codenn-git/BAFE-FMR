@@ -436,7 +436,7 @@ function hideProcessingModal() {
     if (modal) modal.style.display = 'none';
 }
 
-// 08/13: also had modifications here
+// 11/11 updated runProcessing to accommodate the new ManualRoadProcessor workflow in fmr_processing.py
 function runProcessing() {
   const workflowType = document.querySelector('input[name="workflow-type"]:checked').value;
   const imageType = document.getElementById('image-type').value; // still passed to keep API stable
@@ -444,23 +444,56 @@ function runProcessing() {
 
   // MANUAL PROCESSING
   if (workflowType === 'manual') {
-    // validate rows
-    const valid = manualFMRs.every(m => m.geometry && Number.isInteger(m.selectedFmrId));
-    if (!valid) {
-      alert('Please pick an FMR for each row and finish drawing the line.');
+    // Validate that manual FMRs have been drawn
+    if (manualFMRs.length === 0) {
+      alert('Please add at least one FMR row for manual processing');
       return;
     }
-    // send one request per manual row
+    
+    // Check that all have geometry drawn
+    const incompleteRows = manualFMRs.filter(m => !m.geometry);
+    if (incompleteRows.length > 0) {
+      alert('Please finish drawing centerlines for all FMR rows');
+      return;
+    }
+    
+    let hasErrors = false;
     manualFMRs.forEach(m => {
-      processFMR(null, null, 'manual', imageType, {
-        selectedFmrId: m.selectedFmrId,
-        geometry: m.geometry
-      });
+        // Get image_path for each manual FMR
+        const fmrId = m.selectedFmrId;
+        
+        // Try to get a checked image for this FMR
+        let imagePath = getSelectedImagePath(fmrId);
+        
+        // If no checked image, try to get the first available image for this FMR
+        if (!imagePath) {
+            const availableImages = currentMatchingImages[fmrId] || [];
+            if (availableImages.length > 0) {
+                imagePath = availableImages[0].path;
+                console.log(`Using first available image for FMR-${fmrId}: ${imagePath}`);
+            }
+        }
+        
+        if (!imagePath) {
+            alert(`No image available for FMR-${fmrId}. Please select an FMR with available images.`);
+            hasErrors = true;
+            return;
+        }
+        
+        // Process this manual FMR with the image path
+        processFMR(null, imagePath, 'manual', imageType, {
+            selectedFmrId: m.selectedFmrId,
+            geometry: m.geometry
+        });
     });
+    
+    if (!hasErrors) {
+        hideProcessingModal();
+    }
     return;
   }
-
   
+  // AUTOMATIC PROCESSING 
   const fmrIds = Array.from(selectedIds);
   const imagesToProcess = [];
   if (processType === 'selected') {
@@ -482,41 +515,57 @@ function runProcessing() {
     return;
   }
   imagesToProcess.forEach(item => processFMR(item.fmr_id, item.image_path, 'automatic', imageType));
+  hideProcessingModal();
 }
 
-// 8:13: Function to process FMRs
+// 11/11 updated to accommodate the new ManualRoadProcessor workflow in fmr_processing.py
 function processFMR(fmr_id, image_path, workflow_type, image_type, manualFMR = null) {
-  const body = { workflow_type, image_type };
+  const body = { 
+    workflow_type, 
+    image_type,
+    image_path
+  };
+  
   if (workflow_type === 'manual' && manualFMR) {
-        body.manual_fmr = {
-        selected_fmr_id: manualFMR.selectedFmrId,
-        geometry: manualFMR.geometry
-        };
-    } else {
-        body.fmr_id = fmr_id;
-        body.image_path = image_path;
+    body.manual_fmr = {
+      selected_fmr_id: manualFMR.selectedFmrId,
+      geometry: manualFMR.geometry
+    };
+  } else {
+    // Automatic workflow
+    body.fmr_id = fmr_id;
   }
 
   fetch('/process_fmr', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(body)
-    })
-    .then(r => r.json())
-    .then(data => {
-        if (data.status === 'error') {
-        console.error('Processing error:', data.message);
-        alert(`Error: ${data.message}`);
-        } else {
-        console.log('Processing results:', data);
-        alert('Processing complete.');
-        }
-    })
-    .catch(err => {
-        console.error(err);
-        alert(`Error: ${err.message}`);
-    });
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body)
+  })
+  .then(r => r.json())
+  .then(data => {
+    if (data.status === 'error') {
+      console.error('Processing error:', data.message);
+      alert(`Error: ${data.message}`);
+    } else {
+      console.log('Processing results:', data);
+      alert(`Processing complete for ${workflow_type === 'manual' ? 'Manual FMR' : `FMR-${fmr_id}`}`);
+    }
+  })
+  .catch(err => {
+    console.error(err);
+    alert(`Error: ${err.message}`);
+  });
 }
+
+// 11/11: function to get selected FMR path
+function getSelectedImagePath(fmrId) {
+    // Get the checked image checkbox for this FMR
+    const checkedBox = document.querySelector(
+        `.image-checkbox:checked[data-fmr-id="${fmrId}"]`
+    );
+    return checkedBox ? checkedBox.dataset.imagePath : null;
+}
+
 
 // Update the run button state based on selections
 function updateRunButtonState() {
@@ -888,7 +937,7 @@ function drawManualLine(index, selectedFmrId) { //11/03: upgraded
         restoreFns.forEach(fn => fn()); //11/03: new
         toggleDrawingUI(false); //11/03: new
         removeMeasureTooltip(); //11/03: new
-        hideMannualBanner(); //11/05
+        hideManualBanner(); //11/05
     }
   }; //11/03: new
 

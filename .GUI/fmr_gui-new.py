@@ -31,6 +31,7 @@ from io import BytesIO
 
 from utilv3 import Preprocessing, Filters, Morph, MeasureWidth, measure_line, export
 from fmr_incremental_updater import IncrementalUpdater
+from fmr_processing import process_automatic, process_manual
 
 import matplotlib
 matplotlib.use("Agg")
@@ -53,15 +54,13 @@ filtered_gdf = gdf.copy()
 
 # ==========================================================
 # Processing Functions
-# not yet finished (Manual, Automatic working with bugs)
-
 # ============================================================================
 # process_fmr — Manual: GeoJSON + CSV (no default width), Automatic unchanged
 # ============================================================================
 
 #11/07: manual branch saves centerline (always) + polygon (only if width given), and updates CSV
 @app.route('/process_fmr', methods=['POST'])
-def process_fmr():  #11/07
+def process_fmr():  #11/07; #Need to add Width Margin of Error
     """Process FMR with chosen workflow.
        Manual:
          1) Save drawn centerline to fmr_centerlines.geojson.
@@ -76,111 +75,6 @@ def process_fmr():  #11/07
     CENTERLINES_GEOJSON = os.path.join(GEOJSON_OUTPUT, "fmr_centerlines_aina.geojson")  #11/07
     POLYGONS_GEOJSON    = os.path.join(GEOJSON_OUTPUT, "fmr_polygons_aina.geojson")     #11/07
 
-    # ----------------------------
-    # Helpers (local, minimal)
-    # ----------------------------
-    #11/07: merge df_new into target GeoJSON; dedupe rows via mask function
-    def _merge_into_geojson(df_new, target_path, dedupe_mask_fn):  #11/07
-        os.makedirs(os.path.dirname(target_path), exist_ok=True)  #11/07
-        if os.path.exists(target_path):
-            try:
-                df_old = gpd.read_file(target_path)
-            except Exception:
-                df_old = gpd.GeoDataFrame(columns=df_new.columns, crs=df_new.crs)
-            try:
-                keep = ~dedupe_mask_fn(df_old)
-                df_old = df_old.loc[keep].copy()
-            except Exception:
-                pass
-            df_out = gpd.GeoDataFrame(pd.concat([df_old, df_new], ignore_index=True), crs=df_new.crs)
-        else:
-            df_out = df_new
-        if "TIMESTAMP" in df_out.columns:
-            df_out["TIMESTAMP"] = df_out["TIMESTAMP"].astype(str)
-        df_out.to_file(target_path, driver="GeoJSON")
-        return target_path  #11/07
-
-    #11/07: save manual centerline (WGS84 LineString) into fmr_centerlines.geojson
-    def _save_manual_centerline_geojson(
-        fmr_id_str, line_geom_geojson, *, length_m, progress_percent, status,
-        image_type="", mean_width_m="", processing_type="manual"
-    ):  #11/07
-        os.makedirs(GEOJSON_OUTPUT, exist_ok=True)
-        os.makedirs(OUTPUT_BASE, exist_ok=True)
-
-        processing_type = "manual" if str(processing_type).lower() != "automatic" else "automatic"  #11/07
-
-        ln = shape(line_geom_geojson)  # WGS84 LineString  #11/07
-        gdf_line = gpd.GeoDataFrame(
-            [{
-                "FMR_ID":           str(fmr_id_str),
-                "TIMESTAMP":        datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                "length_m":         float(length_m),
-                "progress_percent": float(progress_percent),
-                "status":           status,
-                "image_type":       image_type or "",
-                "mean_width_m":     ("" if mean_width_m in (None, "None") else mean_width_m),
-                "processing_type":  processing_type,
-            }],
-            geometry=[ln], crs="EPSG:4326"
-        )
-
-        def _mask(df):
-            return (df.get("FMR_ID", "") == str(fmr_id_str)) & (df.get("processing_type", "") == processing_type)  #11/07
-
-        out_path = _merge_into_geojson(gdf_line, CENTERLINES_GEOJSON, _mask)
-
-        # Optional per-FMR copy
-        per_fmr = os.path.join(OUTPUT_BASE, f"{str(fmr_id_str)}.geojson")
-        gdf_line.to_file(per_fMR := per_fmr, driver="GeoJSON")  #11/07
-        return out_path, per_fMR  #11/07
-
-    #11/07: build polygon by buffering centerline by (mean_width_m/2) in meters (no defaults)
-    def _build_manual_polygon_from_centerline(line_geom_geojson, mean_width_m, metric_crs="EPSG:32651"):  #11/07
-        if mean_width_m is None:
-            raise ValueError("mean_width_m is required to build polygon")  #11/07
-        try:
-            mw = float(mean_width_m)
-        except Exception:
-            raise ValueError("mean_width_m must be numeric")  #11/07
-        if mw <= 0:
-            raise ValueError("mean_width_m must be > 0")  #11/07
-
-        ln_wgs = shape(line_geom_geojson)
-        gdf_ln = gpd.GeoDataFrame([{"geometry": ln_wgs}], crs="EPSG:4326").to_crs(metric_crs)
-        buf = mw / 2.0  # meters
-        poly_32651 = gdf_ln.buffer(buf, cap_style=2, join_style=2, resolution=4).iloc[0]
-        gdf_pg = gpd.GeoDataFrame([{"geometry": poly_32651}], crs=metric_crs).to_crs("EPSG:4326")
-        return gdf_pg.geometry.iloc[0]  # shapely Polygon (WGS84)  #11/07
-
-    #11/07: save manual polygon (WGS84 Polygon) into fmr_polygons.geojson
-    def _save_manual_polygon_geojson(
-        fmr_id_str, polygon_geom, *, image_type="", mean_width_m="", processing_type="manual"
-    ):  #11/07
-        os.makedirs(GEOJSON_OUTPUT, exist_ok=True)
-
-        processing_type = "manual" if str(processing_type).lower() != "automatic" else "automatic"  #11/07
-
-        gdf_poly = gpd.GeoDataFrame(
-            [{
-                "FMR_ID":          str(fmr_id_str),
-                "TIMESTAMP":       datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                "image_type":      image_type or "",
-                "mean_width_m":    ("" if mean_width_m in (None, "None") else mean_width_m),
-                "processing_type": processing_type,
-            }],
-            geometry=[polygon_geom], crs="EPSG:4326"
-        )
-
-        def _mask(df):
-            return (df.get("FMR_ID", "") == str(fmr_id_str)) & (df.get("processing_type", "") == processing_type)  #11/07
-
-        out_path = _merge_into_geojson(gdf_poly, POLYGONS_GEOJSON, _mask)
-        return out_path  #11/07
-
-    # ----------------------------
-    # Request parsing / validation
-    # ----------------------------
     data = request.json  #11/07
     workflow_type = data.get("workflow_type")             # 'manual' or 'automatic'  #11/07
     image_type = data.get("image_type")                   # optional label  #11/07
@@ -194,7 +88,7 @@ def process_fmr():  #11/07
 
     try:
         # CSV database path (shared)
-        fmr_db_file = os.path.join(os.path.dirname(shapefile_path), "fmr_database_migo.csv")  #11/07
+        fmr_db_file = os.path.join(os.path.dirname(shapefile_path), "fmr_database_aina.csv")  #11/07
 
         def _ensure_csv_columns(df):  #11/07
             cols = [
@@ -211,162 +105,98 @@ def process_fmr():  #11/07
         # ----------------------------
         # MANUAL
         # ----------------------------
-        if workflow_type == 'manual':  #11/07
+        if workflow_type == 'manual':
             mf = manual_fmr or {}
             sel_id = mf.get("selected_fmr_id", None)
             geom_json = mf.get("geometry", None)
+            image_path = data.get("image_path")
 
             if sel_id is None or geom_json is None:
-                return jsonify({"status": "error",
-                                "message": "Manual workflow requires manual_fmr with selected_fmr_id and geometry"}), 400  #11/07
+                return jsonify({
+                    "status": "error",
+                    "message": "Manual workflow requires manual_fmr with selected_fmr_id and geometry"
+                }), 400
 
-            # Optional width from request; NO DEFAULTS
-            req_width = mf.get("mean_width_m", mf.get("width_m", None))  # may be None  #11/07
-            mean_width_m = None
-            if req_width not in (None, "", "None"):
-                try:
-                    reqw = float(req_width)
-                    if reqw > 0:
-                        mean_width_m = reqw
-                except Exception:
-                    mean_width_m = None  # stay transparent (skip polygon)  #11/07
+            if not image_path or not os.path.exists(image_path):
+                return jsonify({
+                    "status": "error",
+                    "message": "Manual workflow requires a valid image_path"
+                }), 400
 
-            # Resolve FMR name & planned geometry
+            # Get selected FMR geometry (for reference only)
             try:
                 sel_row = gdf.loc[sel_id]
-            except Exception:
-                return jsonify({"status": "error", "message": f"Selected FMR id {sel_id} not found"}), 400  #11/07
-
-            fmr_name = str(sel_row.get("name", f"FMR-{sel_id}"))  #11/07
-            fmr_geom_master = sel_row.geometry  #11/07
-
-            # Compute lengths (meters)
-            try:
-                drawn_geom = shape(geom_json)
-                drawn_gdf = gpd.GeoDataFrame({'geometry': [drawn_geom]}, crs='EPSG:4326').to_crs('EPSG:32651')
+                fmr_name = str(sel_row.get("name", f"FMR-{sel_id}"))
+                fmr_geom = sel_row.geometry
+                selected_fmr_gdf = gpd.GeoDataFrame({'geometry': [fmr_geom]}, crs=gdf.crs)
+                if selected_fmr_gdf.crs is None:
+                    selected_fmr_gdf = selected_fmr_gdf.set_crs('EPSG:4326')
             except Exception as e:
-                return jsonify({"status": "error", "message": f"Invalid manual geometry: {str(e)}"}), 400  #11/07
+                return jsonify({
+                    "status": "error",
+                    "message": f"Selected FMR id {sel_id} not found: {e}"
+                }), 400
 
-            try:
-                planned_len_m = gpd.GeoSeries([fmr_geom_master], crs=gdf.crs).to_crs("EPSG:32651").length.iloc[0]
-            except Exception:
-                planned_len_m = gpd.GeoSeries([fmr_geom_master], crs="EPSG:32651").length.iloc[0]  #11/07
-
-            drawn_len_m = float(drawn_gdf.length.iloc[0])  #11/07
-
-            # Progress & status
-            progress = 0.0
-            status = "Not Started"
-            if planned_len_m and planned_len_m > 0:
-                progress = float((drawn_len_m / float(planned_len_m)) * 100.0)
-                if progress > 90:
-                    status = "Completed"
-                elif progress == 0:
-                    status = "Not Started"
-                else:
-                    status = "On-going"
-
-            # (1) Save centerline (always)
-            try:
-                center_out, per_fmr = _save_manual_centerline_geojson(
-                    fmr_id_str=fmr_name,
-                    line_geom_geojson=geom_json,
-                    length_m=drawn_len_m,
-                    progress_percent=progress,
-                    status=status,
-                    image_type=image_type or "",
-                    mean_width_m=(mean_width_m if mean_width_m is not None else ""),
-                    processing_type="manual"
-                )
-            except Exception as e:
-                return jsonify({"status": "error", "message": f"Failed to save centerline GeoJSON: {e}"}), 500  #11/07
-
-            # (2) Save polygon ONLY if a valid width was provided
-            poly_out = None
-            if mean_width_m is not None and mean_width_m > 0:
-                try:
-                    poly_wgs = _build_manual_polygon_from_centerline(geom_json, mean_width_m)  #11/07
-                    poly_out = _save_manual_polygon_geojson(
-                        fmr_id_str=fmr_name,
-                        polygon_geom=poly_wgs,
-                        image_type=image_type or "",
-                        mean_width_m=mean_width_m,
-                        processing_type="manual"
-                    )
-                except Exception as e:
-                    return jsonify({"status": "error", "message": f"Failed to save polygon GeoJSON: {e}"}), 500  #11/07
-
-            # (3) Update CSV (overwrite last row when On-going; else append)
-            csv_updated, csv_rows_affected = False, 0
-            if os.path.exists(fmr_db_file):
-                try:
-                    df = pd.read_csv(fmr_db_file)
-                    df = _ensure_csv_columns(df)
-
-                    mask = (df["FMR"] == fmr_name)
-                    now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                    out_paths = f"centerlines_geojson: {center_out}; per_fmr_geojson: {per_fmr}"
-                    if poly_out:
-                        out_paths = f"{out_paths}; polygon_geojson: {poly_out}"
-
-                    values = {
-                        "FMR": fmr_name,
-                        "Current FMR Length": drawn_len_m,
-                        "FMR Progress": progress,
-                        "FMR Status": status,
-                        "Mean FMR Width": (mean_width_m if mean_width_m is not None else ""),
-                        "Image Type": image_type or "",
-                        "Processing Type": "Manual",
-                        "TIMESTAMP": now_str,
-                        "Output_Paths": out_paths
-                    }
-
-                    if status == "On-going" and mask.any():
-                        idx = df.index[mask][-1]
-                        for k, v in values.items():
-                            if k in df.columns:
-                                df.at[idx, k] = v
-                        csv_rows_affected = 1
-                    else:
-                        insert_pos = (df.index[mask][-1] + 1) if mask.any() else len(df)
-                        upper = df.iloc[:insert_pos]
-                        lower = df.iloc[insert_pos:]
-                        new_row = pd.DataFrame([values], columns=df.columns)
-                        df = pd.concat([upper, new_row, lower], ignore_index=True)
-                        csv_rows_affected = 1
-
-                    df.to_csv(fmr_db_file, index=False)
-                    csv_updated = True
-                except Exception:
-                    csv_updated = False
-
-            # Response (transparent about polygon creation)
-            payload_paths = {
-                "centerlines_geojson": center_out,
-                "per_fmr_geojson": per_fmr
-            }
-            if poly_out:
-                payload_paths["polygons_geojson"] = poly_out
-
-            return jsonify({
-                "status": "success",
-                "results": {
-                    "FMR_ID": fmr_name,
-                    "TIMESTAMP": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                    "length_m": drawn_len_m,
-                    "progress_percent": progress,
-                    "status": status,
-                    "image_type": image_type or "",
-                    "mean_width_m": (mean_width_m if mean_width_m is not None else ""),
-                    "processing_type": "manual",
-                    "planned_length_m": float(planned_len_m)
-                },
-                "output_paths": payload_paths,
-                "csv_update": {
-                    "updated": csv_updated,
-                    "rows_affected": csv_rows_affected
-                }
-            })  #11/07
+            # Process using refactored manual processor WITH IMAGE PROCESSING
+            processing_result = process_manual(
+                manual_centerline_geojson=geom_json,
+                selected_fmr_gdf=selected_fmr_gdf,
+                raster_path=image_path,  # NEW: Required for image processing
+                output_base_dir=os.path.join(os.path.dirname(bsg_folder), "Outputs"),
+                geojson_output_dir=GEOJSON_OUTPUT,
+                image_type=image_type or "",
+                fmr_name=fmr_name  # Optional, will auto-detect
+            )
+            
+            # Update CSV database
+            if processing_result.get("status") == "success":
+                fmr_db_file = os.path.join(os.path.dirname(shapefile_path), "fmr_database_migo.csv")
+                if os.path.exists(fmr_db_file):
+                    try:
+                        df = pd.read_csv(fmr_db_file)
+                        df = _ensure_csv_columns(df)
+                        
+                        results = processing_result.get("results", {})
+                        output_paths = processing_result.get("output_paths", {})
+                        
+                        mask = (df["FMR"] == fmr_name)
+                        
+                        csv_updates = {
+                            "Current FMR Length": results.get("manual_length_m"),
+                            "FMR Progress": results.get("progress_percent"),
+                            "FMR Status": results.get("status"),
+                            "Mean FMR Width": results.get("mean_width_m", ""),  # From transects
+                            "FMR Width ME": results.get("width_MoE"),
+                            "Image Type": results.get("image_type", ""),  # Auto-detected
+                            "Processing Type": "Manual",
+                            "TIMESTAMP": results.get("TIMESTAMP")
+                        }
+                        
+                        # Update or insert
+                        status = results.get("status", "")
+                        if status == "On-going" and mask.any():
+                            idx = df.index[mask][-1]
+                            for k, v in csv_updates.items():
+                                if k in df.columns and v is not None:
+                                    df.at[idx, k] = v
+                        else:
+                            insert_pos = (df.index[mask][-1] + 1) if mask.any() else len(df)
+                            upper = df.iloc[:insert_pos]
+                            lower = df.iloc[insert_pos:]
+                            new_row = pd.DataFrame([csv_updates], columns=df.columns)
+                            df = pd.concat([upper, new_row, lower], ignore_index=True)
+                        
+                        if output_paths:
+                            output_paths_str = "; ".join([f"{desc}: {path}" for desc, path in output_paths.items()])
+                            if mask.any():
+                                df.loc[mask.iloc[-1:].index, "Output_Paths"] = output_paths_str
+                        
+                        df.to_csv(fmr_db_file, index=False)
+                        processing_result["database_updated"] = True
+                    except Exception as e:
+                        processing_result["database_update_error"] = str(e)
+            
+            return jsonify(processing_result)
 
         # ----------------------------
         # AUTOMATIC (unchanged)
@@ -380,9 +210,8 @@ def process_fmr():  #11/07
             fmr_row = gdf.loc[fmr_id]
             fmr_name = str(fmr_row["name"]) if ("name" in fmr_row and pd.notna(fmr_row["name"])) else f"FMR-{fmr_id}"
 
-            # image path lookup (same logic you had)
             if not image_path:
-                fmr_db_alt = os.path.join(os.path.dirname(shapefile_path), "fmr_database_migo.csv")
+                fmr_db_alt = os.path.join(os.path.dirname(shapefile_path), "fmr_database_aina.csv")
                 if os.path.exists(fmr_db_alt):
                     fmr_database = pd.read_csv(fmr_db_alt)
                     fmr_entry = fmr_database[fmr_database["FMR"] == fmr_name]
@@ -400,16 +229,22 @@ def process_fmr():  #11/07
             if fmr_gdf.crs is None:
                 fmr_gdf = fmr_gdf.set_crs('EPSG:4326')
 
-            processing_result = processing(fmr_gdf, image_path, image_type)  #11/07
+            processing_result = process_automatic(
+                                fmr_gdf=fmr_gdf,
+                                raster_path=image_path,
+                                output_base_dir=os.path.join(os.path.dirname(bsg_folder), "Outputs"),
+                                geojson_output_dir=GEOJSON_OUTPUT,
+                                fmr_name=fmr_name
+                                )
 
         else:
             return jsonify({"status": "error", "message": "Invalid workflow type. Must be 'manual' or 'automatic'"}), 400  #11/07
 
         # ----------------------------
-        # AUTOMATIC CSV update (kept)
+        # AUTOMATIC CSV update
         # ----------------------------
         if processing_result.get("status") == "success":
-            fmr_db_file2 = os.path.join(os.path.dirname(shapefile_path), "fmr_database_migo.csv")
+            fmr_db_file2 = os.path.join(os.path.dirname(shapefile_path), "fmr_database_aina.csv")
             if os.path.exists(fmr_db_file2):
                 try:
                     df = pd.read_csv(fmr_db_file2)
@@ -417,7 +252,17 @@ def process_fmr():  #11/07
 
                     results = processing_result.get("results", {})
                     output_paths = processing_result.get("output_paths", {})
-                    processing_type_str = "Planned"
+
+                    csv_updates = {
+                        "Current FMR Length": results.get("length_m"),
+                        "FMR Progress": results.get("progress_percent"),
+                        "FMR Status": results.get("status"),
+                        "Mean FMR Width": results.get("mean_width_m"),
+                        "FMR Width ME": results.get("width_MoE"),
+                        "Image Type": results.get("image_type"),  # Auto-detected
+                        "Processing Type": "Automatic",
+                        "TIMESTAMP": results.get("TIMESTAMP")
+                    }
 
                     if image_path:
                         mask = (df["FMR"] == fmr_name) & (df["Image Path"] == image_path)
@@ -429,10 +274,10 @@ def process_fmr():  #11/07
                         mask = (df["FMR"] == alt_fmr_name)
 
                     if mask.any():
-                        for column, value in results.items():
+                        for column, value in csv_updates.items():
                             if column in df.columns and value is not None:
                                 df.loc[mask, column] = value
-                        df.loc[mask, "Processing Type"] = processing_type_str
+
                         if output_paths:
                             output_paths_str = "; ".join([f"{desc}: {path}" for desc, path in output_paths.items()])
                             df.loc[mask, "Output_Paths"] = output_paths_str
@@ -452,204 +297,6 @@ def process_fmr():  #11/07
         traceback.print_exc()
         return jsonify({"status": "error", "message": f"Processing failed: {str(e)}"}), 500  #11/07
 
-## processing function
-## 09/04: Output_folder_path added to database.csv; a summary of the results also compiled in .txt file
-def processing(vector_gdf, raster_path, image_type):
-    results = {}
-    raster_directory = os.path.dirname(raster_path)
-    master_directory = os.path.dirname(raster_directory)
-    output_folder = os.path.join(os.path.dirname(os.path.dirname(master_directory)), "Outputs")
-    
-    # Create timestamped subfolder for this processing run
-    from datetime import datetime
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    
-    # Get FMR name for folder naming
-    fmr_name = "Unknown_FMR"
-    if hasattr(vector_gdf, 'iloc') and len(vector_gdf) > 0:
-        # Try to extract FMR name from the vector data if available
-        if 'name' in vector_gdf.columns and pd.notna(vector_gdf.iloc[0].get('name')):
-            fmr_name = str(vector_gdf.iloc[0]['name'])
-    
-    # Create specific output directory for this FMR and timestamp
-    specific_output_folder = os.path.join(output_folder, f"{fmr_name}_{timestamp}")
-    os.makedirs(specific_output_folder, exist_ok=True)
-    
-    # Dictionary to store all output paths (for internal use only)
-    output_paths = {}
-
-    try:
-        # FIX: Ensure vector_gdf has a CRS before any operations
-        if vector_gdf.crs is None:
-            # Set appropriate CRS - adjust EPSG code based on your data
-            vector_gdf = vector_gdf.set_crs('EPSG:32651')  # WGS84 as default
-            print("Warning: No CRS found, setting to EPSG:32651")
-        
-        preprocessor = Preprocessing()
-        preprocessor.reproject(raster_path)
-        
-        if image_type == 'BSG':
-            int, tol, res = 3, 0.15, 0.3
-
-            clipped_data, clipped_transform = preprocessor.clipraster(vector_data=vector_gdf, buffer_dist=25) #bbox=False
-            clipped_data_box, _ = preprocessor.clipraster(vector_data=vector_gdf, bbox=True) #for exporting purposes
-
-            filter = Filters()
-            warm_raster = filter.enhance_image_warmth(clipped_data)
-            stretch_raster = filter.enhance_linear_stretch(clipped_data)
-
-            morph = Morph()
-            morph_warm = morph.process(warm_raster, a=4, b=3, ite1=2, ite2=3)
-            morph_stretch = morph.process(stretch_raster, a=4, b=3, ite1=2, ite2=3)
-
-            merged_or = np.logical_or(morph_warm, morph_stretch)
-            initial_binary_raster = merged_or
-
-        if image_type == 'PNEO' or image_type == 'SkySat':
-            int, tol, res = 3, 0.15, 0.3
-
-            clipped_data, clipped_transform = preprocessor.clipraster(vector_data=vector_gdf, bbox=True)
-            clipped_data_box = clipped_data
-
-            filter = Filters()
-            cielab = filter.cielab(clipped_data)
-            
-            morph = Morph()
-            initial_binary_raster = morph.threshold_cielab(cielab)
-
-        final_binary_transform = clipped_transform
-
-        # plt.imshow(final_clipped_data, cmap="gray")
-        final_binary_raster = morph.remove_small_islands(initial_binary_raster, min_size=500)
-        final_binary_raster = np.squeeze(final_binary_raster)
-        final_binary_raster = cv2.morphologyEx(final_binary_raster.astype(np.uint8), cv2.MORPH_CLOSE, np.ones((3,3), np.uint8), iterations=3)
-
-        # Export intermediate binary raster
-        binary_raster_path = os.path.join(specific_output_folder, f"{fmr_name}_binary_raster.tif")
-        export(final_binary_raster, binary_raster_path, 'raster', 'EPSG:32651', raster_transform=final_binary_transform)
-        output_paths['Binary_Raster_Path'] = binary_raster_path
-
-        measure = MeasureWidth(final_binary_raster, final_binary_transform, vector_gdf)
-        transects = measure.process(int=int, tol=tol, res=res)
-        road_mean = transects['width'].mean()
-        
-        # Export transects
-        if not transects.empty:
-            transects_path = os.path.join(specific_output_folder, f"{fmr_name}_transects.shp")
-            measure.export(transects_path, gdf=transects)
-            output_paths['Transects_Path'] = transects_path
-
-        # Clip final binary raster for centerline extraction
-        final_binary_raster, final_binary_transform = preprocessor.clipraster(
-                            raster_data = final_binary_raster.astype(np.uint8),
-                            vector_data = vector_gdf,
-                            transform = clipped_transform,
-                            buffer_dist = 3)
-        final_binary_raster = np.squeeze(final_binary_raster)
-
-        # Generate and export final centerline
-        final_line = measure_line(final_binary_raster, final_binary_transform, spacing=3)
-        
-        if final_line is not None and not final_line.empty:
-            final_line_path = os.path.join(specific_output_folder, f"{fmr_name}_centerline.shp")
-            export(final_line, final_line_path, 'vector', 'EPSG:32651')
-            output_paths['Centerline_Path'] = final_line_path
-
-        # Generate and export road polygon; will now use the measure_line function
-        road_polygon = measure_line(final_binary_raster, final_binary_transform, road_width=road_mean, return_polygon=True)
-        if road_polygon is not None and not road_polygon.empty:
-            road_polygon_path = os.path.join(specific_output_folder, f"{fmr_name}_road_polygon.shp")
-            export(road_polygon, road_polygon_path, 'vector', 'EPSG:32651')
-            output_paths['Road_Polygon_Path'] = road_polygon_path
-
-        # Export original input vector (planned FMR)
-        planned_fmr_path = os.path.join(specific_output_folder, f"{fmr_name}_planned_fmr.shp")
-        export(vector_gdf, planned_fmr_path, 'vector', 'EPSG:32651')
-        output_paths['Planned_FMR_Path'] = planned_fmr_path
-
-        # Export clipped input raster
-        clipped_raster_path = os.path.join(specific_output_folder, f"{fmr_name}_clipped_input.tif")
-        export(clipped_data_box, clipped_raster_path, 'raster', 'EPSG:32651', raster_transform=clipped_transform)
-        output_paths['Clipped_Input_Path'] = clipped_raster_path
-
-        # FIX: Ensure CRS is set before transformation
-        if vector_gdf.crs is None:
-            vector_gdf = vector_gdf.set_crs('EPSG:32651')
-        
-        vector_length = vector_gdf.to_crs("EPSG:32651").length.sum()
-
-        if final_line is not None and not final_line.empty:
-            final_line_length = final_line.length.values[0]
-            progress = (final_line_length / vector_length) * 100
-
-            if progress > 90:
-                progress_status = "Completed"
-            elif progress == 0:
-                progress_status = "Not Started"
-            else:
-                progress_status = "On-going"
-
-            results['Current FMR Length'] = float(final_line_length)
-            results['Planned FMR Length'] = float(vector_length) 
-            results['FMR Progress'] = float(progress)
-            results['FMR Status'] = progress_status
-            results['Mean FMR Width'] = float(road_mean) if not transects.empty else None
-
-        else:
-            progress = 0  # when no road is detected
-            results['Current FMR Length'] = None
-            results['Planned FMR Length'] = float(vector_length)
-            results['FMR Progress'] = None
-            results['Mean FMR Width'] = None
-            results['FMR Status'] = "Not Started"  # status when no road detected
-            results['message'] = 'No road line detected'
-
-        # MODIFIED: Only store the output directory path, not individual file paths
-        results['Output_Directory'] = specific_output_folder
-
-        # Create a summary text file with all processing information
-        summary_path = os.path.join(specific_output_folder, f"{fmr_name}_processing_summary.txt")
-        with open(summary_path, 'w') as f:
-            f.write(f"FMR Processing Summary\n")
-            f.write(f"=====================\n\n")
-            f.write(f"FMR Name: {fmr_name}\n")
-            f.write(f"Processing Date: {timestamp}\n")
-            f.write(f"Image Type: {image_type}\n")
-            f.write(f"Input Raster: {raster_path}\n\n")
-            f.write(f"Results:\n")
-            for key, value in results.items():
-                if key != 'Output_Directory':  # Skip output directory in the summary
-                    f.write(f"  {key}: {value}\n")
-            f.write(f"\nOutput Files:\n")
-            for desc, path in output_paths.items():
-                f.write(f"  {desc}: {path}\n")
-        
-        # Add summary to internal output_paths but don't include in results
-        output_paths['Summary_Path'] = summary_path
-
-        print(f"Processing completed. Results exported to: {specific_output_folder}")
-        
-        return {
-            "status": "success",
-            "results": results,
-            "output_paths": output_paths  # Keep this for internal use
-        }
-        
-    except Exception as e:
-        # Clean up the output folder if processing failed
-        import shutil
-        if os.path.exists(specific_output_folder):
-            try:
-                shutil.rmtree(specific_output_folder)
-                print(f"Cleaned up failed processing folder: {specific_output_folder}")
-            except Exception as cleanup_error:
-                print(f"Warning: Could not clean up folder {specific_output_folder}: {cleanup_error}")
-        
-        return {
-            "status": "error",
-            "message": str(e)
-        }
-
 # ==========================================================
 # Original Flask Routes
 # ==========================================================
@@ -663,7 +310,7 @@ def getDatabase():
 
     master_fmr = shapefile_path
     bsg_folder_path = bsg_folder
-    fmr_db_file = os.path.join(os.path.dirname(master_fmr), "fmr_database_migo.csv")
+    fmr_db_file = os.path.join(os.path.dirname(master_fmr), "fmr_database_aina.csv")
 
     # Load FMRs in EPSG:32651
     fmr_gdf = gpd.read_file(master_fmr).to_crs("EPSG:32651")
@@ -772,6 +419,7 @@ def getDatabase():
                 "FMR Progress": "",
                 "FMR Status": "",
                 "Mean FMR Width": "",
+                "FMR Width ME": "",
                 "Processing Type": "",
                 "Image Path": tif_path
             })
@@ -793,6 +441,7 @@ def getDatabase():
                     "FMR Progress": "",
                     "FMR Status": "",
                     "Mean FMR Width": "",
+                    "FMR Width ME": "",
                     "Processing Type": "",
                     "Image Path": ""
                 })
@@ -811,12 +460,14 @@ def getDatabase():
     results_df["Date"] = pd.to_datetime(results_df["Date"], errors="coerce")
 
     # === Part 4: Append and sort ===
-    if not existing_df.empty:
-        if "Processing Type" not in existing_df.columns:
-            existing_df["Processing Type"] = ""
-        final_df = pd.concat([existing_df, results_df], ignore_index=True)
-    else:
-        final_df = results_df
+    #----- 11/11 forced adding "Processing Type" column, removed for now
+    # if not existing_df.empty:
+    #     if "Processing Type" not in existing_df.columns:
+    #         existing_df["Processing Type"] = ""
+    #     final_df = pd.concat([existing_df, results_df], ignore_index=True)
+    # else:
+    #     final_df = results_df
+    #----- end
 
     final_df["FMR_INDEX"] = final_df["FMR"].str.extract(r"(\d+)", expand=False).astype(int)
     final_df["Date"] = pd.to_datetime(final_df["Date"], errors="coerce")
@@ -1866,31 +1517,8 @@ class FMRMainWindow(QMainWindow):
         print("Closing FMR GUI application...")
         event.accept()
 
-
-def migrate_database_add_processing_type():
-    """Add Processing Type column to existing database if it doesn't exist"""
-    fmr_db_file = os.path.join(os.path.dirname(shapefile_path), "fmr_database_aina.csv")
-    
-    if not os.path.exists(fmr_db_file):
-        print("Database file does not exist, no migration needed.")
-        return
-    
-    try:
-        df = pd.read_csv(fmr_db_file)
-        
-        # Check if Processing Type column already exists
-        if "Processing Type" not in df.columns:
-            # Add the column with empty values
-            df["Processing Type"] = ""
-            
-            # Save the updated database
-            df.to_csv(fmr_db_file, index=False)
-            print("Successfully added 'Processing Type' column to existing database")
-        else:
-            print("'Processing Type' column already exists in database")
-            
-    except Exception as e:
-        print(f"Error during database migration: {str(e)}")
+# 11/11 removed function migrate_database_add_processing_type, since it was not used.
+# should add or replace it with a column adder
 
 def main():
     """Optimized main function with lazy loading"""
