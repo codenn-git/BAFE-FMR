@@ -570,7 +570,7 @@ def measure_line(raster_data, transform, spacing=3,
                 return_polygon=False):
     """
     Create a continuous road centerline from left to right from binary raster.
-    Optionally create road polygon with specified width.
+    Uses simple nearest-neighbor with endpoint protection.
     
     Parameters:
     - raster_data: 2D numpy array (1=road, 0=non-road)
@@ -578,7 +578,7 @@ def measure_line(raster_data, transform, spacing=3,
     - spacing: sample every N pixels (default=3)
     - return_points: if True, returns both points and line
     - crs: coordinate reference system
-    - road_width: width of road in map units (e.g., meters). If None, only returns centerline
+    - road_width: width of road in map units
     - return_polygon: if True and road_width is specified, returns polygon instead of line
     
     Returns:
@@ -599,42 +599,108 @@ def measure_line(raster_data, transform, spacing=3,
     )
     
     coords = np.array([[p.x, p.y] for p in points_gdf.geometry])
+    
+    # Sort by x-coordinate to establish general left-to-right order
     sorted_idx = np.argsort(coords[:, 0])
     sorted_coords = coords[sorted_idx]
     
+    # Build path using nearest neighbor, but prevent backtracking to start
     path = []
     remaining_points = sorted_coords.copy()
     current_point = remaining_points[0]
     path.append(current_point)
     remaining_points = np.delete(remaining_points, 0, axis=0)
     
+    # Keep track of the last few points to prevent immediate backtracking
+    recent_points = [current_point]
+    lookback = 5  # Number of recent points to avoid
+    
     while len(remaining_points) > 0:
-        nbrs = NearestNeighbors(n_neighbors=1).fit(remaining_points)
-        distances, indices = nbrs.kneighbors([current_point])
-        next_point = remaining_points[indices[0][0]]
+        # Calculate distances to all remaining points
+        distances = np.linalg.norm(remaining_points - current_point, axis=1)
+        
+        # If we're near the end, just pick the closest point
+        if len(remaining_points) <= lookback:
+            next_idx = np.argmin(distances)
+        else:
+            # Get the k nearest neighbors
+            k = min(10, len(remaining_points))
+
+            # Fix: argpartition needs k-1 when array size equals k
+            if k == len(remaining_points):
+                nearest_indices = np.arange(len(remaining_points))
+            else:
+                nearest_indices = np.argpartition(distances, k-1)[:k]
+            
+            # Among nearest neighbors, prefer points that move forward (increasing x)
+            # and avoid points we've recently visited
+            best_idx = None
+            best_score = float('inf')
+            
+            for idx in nearest_indices:
+                candidate = remaining_points[idx]
+                
+                # Skip if too close to recent points (prevents loops)
+                too_close = False
+                for recent in recent_points[-lookback:]:
+                    if np.linalg.norm(candidate - recent) < distances[idx] * 0.1:
+                        too_close = True
+                        break
+                
+                if too_close:
+                    continue
+                
+                # Score: prefer forward movement (positive x direction) and short distance
+                forward_score = -(candidate[0] - current_point[0])  # Negative because we want max
+                if forward_score > distances[idx] * 2:  # If going way backwards
+                    forward_score = distances[idx] * 3  # Heavy penalty
+                
+                score = distances[idx] + forward_score * 0.3
+                
+                if score < best_score:
+                    best_score = score
+                    best_idx = idx
+            
+            # Fallback to nearest if no good candidate found
+            if best_idx is None:
+                best_idx = np.argmin(distances)
+            
+            next_idx = best_idx
+        
+        next_point = remaining_points[next_idx]
         path.append(next_point)
+        
+        # Update tracking
         current_point = next_point
-        remaining_points = np.delete(remaining_points, indices[0][0], axis=0)
+        recent_points.append(current_point)
+        if len(recent_points) > lookback:
+            recent_points.pop(0)
+        
+        remaining_points = np.delete(remaining_points, next_idx, axis=0)
+    
+    # Optional: Light smoothing to reduce small jitters
+    path = np.array(path)
+    if len(path) > 10:
+        from scipy.ndimage import uniform_filter1d
+        window = min(5, len(path) // 3)
+        if window >= 3:
+            path[:, 0] = uniform_filter1d(path[:, 0], size=window, mode='nearest')
+            path[:, 1] = uniform_filter1d(path[:, 1], size=window, mode='nearest')
     
     line = shapely.geometry.LineString(path)
     
     if road_width is not None:
-        # Buffer the line to create a polygon with specified width
         road_polygon = line.buffer(road_width / 2, cap_style=1, join_style=1)
         
         if return_polygon:
-            # Return polygon instead of line
             result_gdf = gpd.GeoDataFrame(geometry=[road_polygon], crs=points_gdf.crs)
         else:
-            # Return both line and polygon
             line_gdf = gpd.GeoDataFrame(geometry=[line], crs=points_gdf.crs)
             polygon_gdf = gpd.GeoDataFrame(geometry=[road_polygon], crs=points_gdf.crs)
-            result_gdf = line_gdf  # Default return is still the line
+            result_gdf = line_gdf
     else:
-        # Original behavior - return line only
         result_gdf = gpd.GeoDataFrame(geometry=[line], crs=points_gdf.crs)
     
-    # Return based on parameters
     if return_points and road_width is not None and not return_polygon:
         return (result_gdf, points_gdf, polygon_gdf)
     elif return_points:
@@ -643,7 +709,95 @@ def measure_line(raster_data, transform, spacing=3,
         return gpd.GeoDataFrame(geometry=[road_polygon], crs=points_gdf.crs)
     else:
         return result_gdf
-
+    
+## Fallback method if resulting progress from skeleton-based approach is Erroneous
+def measure_line_transects(transects_gdf, crs="EPSG:32651", 
+                                 road_width=None, return_polygon=False,
+                                 smooth=True):
+    """
+    Create a road centerline from transect centerpoints.
+    Automatically detects road orientation and sorts accordingly.
+    
+    Parameters:
+    - transects_gdf: GeoDataFrame with transect LineStrings (from MeasureWidth.clip_transects())
+    - crs: coordinate reference system
+    - road_width: width of road in map units (uses mean from transects if None)
+    - return_polygon: if True, returns polygon instead of line
+    - smooth: if True, applies smoothing to the centerline
+    
+    Returns:
+    - GeoDataFrame with centerline or road polygon
+    """
+    from scipy.interpolate import UnivariateSpline
+    from sklearn.decomposition import PCA
+    
+    # Extract centerpoints from each transect
+    centerpoints = []
+    for geom in transects_gdf.geometry:
+        # Get the midpoint of each transect line
+        centerpoint = geom.interpolate(0.5, normalized=True)
+        centerpoints.append([centerpoint.x, centerpoint.y])
+    
+    centerpoints = np.array(centerpoints)
+    
+    # Use PCA to find the principal axis (direction of road)
+    pca = PCA(n_components=2)
+    pca.fit(centerpoints)
+    
+    # First principal component is the direction of maximum variance (road direction)
+    principal_axis = pca.components_[0]
+    
+    # Project all points onto the principal axis to get their position along the road
+    # This gives us a 1D coordinate along the road direction
+    projections = np.dot(centerpoints, principal_axis)
+    
+    # Sort by projection (this sorts along the road direction)
+    sorted_idx = np.argsort(projections)
+    sorted_centerpoints = centerpoints[sorted_idx]
+    
+    if smooth and len(sorted_centerpoints) > 3:
+        # Smooth using spline interpolation
+        try:
+            # Create parameter t based on cumulative distance
+            distances = np.sqrt(np.sum(np.diff(sorted_centerpoints, axis=0)**2, axis=1))
+            t = np.concatenate([[0], np.cumsum(distances)])
+            
+            # Fit splines for x and y
+            # s parameter controls smoothing (lower = less smooth, higher = more smooth)
+            s_factor = len(sorted_centerpoints) * 0.5
+            spline_x = UnivariateSpline(t, sorted_centerpoints[:, 0], s=s_factor, k=3)
+            spline_y = UnivariateSpline(t, sorted_centerpoints[:, 1], s=s_factor, k=3)
+            
+            # Generate smooth points
+            t_smooth = np.linspace(0, t[-1], len(sorted_centerpoints) * 2)
+            smooth_x = spline_x(t_smooth)
+            smooth_y = spline_y(t_smooth)
+            
+            path = np.column_stack([smooth_x, smooth_y])
+        except:
+            # Fallback: use original points if smoothing fails
+            path = sorted_centerpoints
+    else:
+        path = sorted_centerpoints
+    
+    # Create LineString from centerpoints
+    line = shapely.geometry.LineString(path)
+    
+    # Determine road width
+    if road_width is None and 'width' in transects_gdf.columns:
+        road_width = transects_gdf['width'].mean()
+    
+    # Create outputs
+    if road_width is not None:
+        road_polygon = line.buffer(road_width / 2, cap_style=1, join_style=1)
+        
+        if return_polygon:
+            return gpd.GeoDataFrame(geometry=[road_polygon], crs=crs)
+        else:
+            line_gdf = gpd.GeoDataFrame(geometry=[line], crs=crs)
+            return line_gdf
+    else:
+        return gpd.GeoDataFrame(geometry=[line], crs=crs)
 
 def stretch_band(band, lower_percent=2, upper_percent=98):
     ''' 

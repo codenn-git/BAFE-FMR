@@ -14,7 +14,7 @@ from shapely.geometry import shape
 
 from utilv3 import (
     Preprocessing, Filters, Morph, MeasureWidth,
-    measure_line, export
+    measure_line, measure_line_transects, export
 )
 
 class ManualRoadProcessor:
@@ -649,8 +649,15 @@ class AutomaticRoadProcessor:
             self.results['mean_width_m'] = None
             return None
     
-    def extract_centerline(self, preprocessor, spacing=3):
-        """Extract road centerline from binary raster."""
+    def extract_centerline(self, preprocessor, spacing=5):
+        """
+        Extract road centerline with automatic fallback.
+        Tries skeleton method first, falls back to transects if result is erroneous.
+        
+        Parameters:
+        - preprocessor: Preprocessing object
+        - spacing: spacing for skeleton method
+        """
         print(f"[{self.fmr_name}] Extracting centerline...")
         
         # Clip binary raster tightly for centerline extraction
@@ -662,69 +669,104 @@ class AutomaticRoadProcessor:
         )
         binary_clipped = np.squeeze(binary_clipped)
         
-        # Generate centerline
-        self.centerline = measure_line(
+        # Try skeleton-based method first
+        # print(f"[{self.fmr_name}] Trying skeleton-based method...")
+        centerline_skeleton = measure_line(
             binary_clipped,
             binary_transform,
             spacing=spacing,
             crs="EPSG:32651"
         )
         
-        if self.centerline is not None and not self.centerline.empty:
-            # Calculate metrics
-            actual_length = self.centerline.length.values[0]
-            planned_length = self.fmr_gdf.to_crs("EPSG:32651").length.sum()
+        # Calculate progress for skeleton method
+        actual_length_skeleton = centerline_skeleton.length.values[0]
+        planned_length = self.fmr_gdf.to_crs("EPSG:32651").length.sum()
+        progress_skeleton = (actual_length_skeleton / planned_length) * 100
+        status_skeleton = self._determine_status(progress_skeleton)
+        
+        # print(f"[{self.fmr_name}] Skeleton method: {progress_skeleton:.1f}% ({status_skeleton})")
+        
+        # Check if skeleton method is erroneous
+        if status_skeleton == "Erroneous Processing":
+            # print(f"[{self.fmr_name}] Skeleton method erroneous, falling back to transect-based method...")
             
-            progress_percent = (actual_length / planned_length) * 100 if planned_length > 0 else 0
+            # Ensure transects are available
+            if self.transects is None:
+                raise ValueError("Transects must be generated first. Run measure_width() before extract_centerline().")
+            
+            # Use transect-based method
+            self.centerline = measure_line_transects(
+                self.transects,
+                crs="EPSG:32651",
+                smooth=True
+            )
+            
+            # Recalculate metrics with transect method
+            actual_length = self.centerline.length.values[0]
+            progress_percent = (actual_length / planned_length) * 100
             status = self._determine_status(progress_percent)
             
-            self.results['length_m'] = float(actual_length)
-            self.results['planned_length_m'] = float(planned_length)
-            self.results['progress_percent'] = float(progress_percent)
-            self.results['status'] = status
+            print(f"[{self.fmr_name}] Transect method: {progress_percent:.1f}% ({status})")
             
-            # Export centerline
-            centerline_shp = os.path.join(self.output_folder, f"{self.fmr_name}_centerline.shp")
-            export(self.centerline, centerline_shp, 'vector', 'EPSG:32651')
-            
-            print(f"[{self.fmr_name}] Centerline extracted: {actual_length:.1f}m ({progress_percent:.1f}% complete)")
+            self.results['method'] = 'transects'
+            self.results['fallback_reason'] = 'skeleton_erroneous'
+            self.results['skeleton_progress_percent'] = float(progress_skeleton)
         else:
-            print(f"[{self.fmr_name}] Warning: No centerline detected")
-            self.results['length_m'] = None
-            self.results['progress_percent'] = 0
-            self.results['status'] = "Not Started"
+            # Skeleton method is good, use it
+            # print(f"[{self.fmr_name}] Skeleton method successful!")
+            self.centerline = centerline_skeleton
+            actual_length = actual_length_skeleton
+            progress_percent = progress_skeleton
+            status = status_skeleton
+            
+            self.results['method'] = 'skeleton'
+        
+        # Store final metrics
+        self.results['length_m'] = float(actual_length)
+        self.results['planned_length_m'] = float(planned_length)
+        self.results['progress_percent'] = float(progress_percent)
+        self.results['status'] = status
+        
+        # Export centerline
+        centerline_shp = os.path.join(self.output_folder, f"{self.fmr_name}_centerline.shp")
+        export(self.centerline, centerline_shp, 'vector', 'EPSG:32651')
+        
+        print(f"[{self.fmr_name}] Centerline extracted: {actual_length:.1f}m ({progress_percent:.1f}% complete)")
     
-    def generate_polygon(self, road_mean_width, preprocessor):
-        """Generate road polygon using measured width."""
+    def generate_polygon(self, road_mean_width):
+        """
+        Generate road polygon from the extracted centerline and mean width.
+        Uses the centerline that was already extracted (either skeleton or transect-based).
+        
+        Parameters:
+        - road_mean_width: mean width from transects
+        - preprocessor: Preprocessing object (kept for compatibility)
+        """
         if road_mean_width is None or self.centerline is None or self.centerline.empty:
             print(f"[{self.fmr_name}] Skipping polygon generation (no width or centerline)")
             return
         
         print(f"[{self.fmr_name}] Generating road polygon...")
         
-        # Use the preprocessor that was already created (has CRS set)
-        binary_clipped, binary_transform = preprocessor.clipraster(
-            raster_data=self.final_binary_raster.astype(np.uint8),
-            vector_data=self.fmr_gdf,
-            transform=self.clipped_transform,
-            buffer_dist=3
-        )
-        binary_clipped = np.squeeze(binary_clipped)
-        
-        self.road_polygon = measure_line(
-            binary_clipped,
-            binary_transform,
-            road_width=road_mean_width,
-            return_polygon=True,
-            crs="EPSG:32651"
+        # Generate polygon by buffering the existing centerline
+        centerline_geom = self.centerline.geometry.iloc[0]
+        road_polygon_geom = centerline_geom.buffer(
+            road_mean_width / 2, 
+            cap_style=1,  # flat cap
+            join_style=1   # round join
         )
         
-        if self.road_polygon is not None and not self.road_polygon.empty:
-            # Export polygon
-            polygon_shp = os.path.join(self.output_folder, f"{self.fmr_name}_polygon.shp")
-            export(self.road_polygon, polygon_shp, 'vector', 'EPSG:32651')
-            
-            print(f"[{self.fmr_name}] Road polygon generated")
+        self.road_polygon = gpd.GeoDataFrame(
+            geometry=[road_polygon_geom], 
+            crs=self.centerline.crs
+        )
+        
+        # Export polygon
+        polygon_shp = os.path.join(self.output_folder, f"{self.fmr_name}_polygon.shp")
+        export(self.road_polygon, polygon_shp, 'vector', 'EPSG:32651')
+        
+        # method = self.results.get('method', 'skeleton')
+        # print(f"[{self.fmr_name}] Road polygon generated (from {method} centerline)")
     
     def export_to_geojson(self):
         """
@@ -736,7 +778,7 @@ class AutomaticRoadProcessor:
         os.makedirs(self.geojson_output_dir, exist_ok=True)
         
         centerlines_path = os.path.join(self.geojson_output_dir, "fmr_centerlines_aina.geojson")
-        polygons_path = os.path.join(self.geojson_output_dir, "fmr_polygons.geojson")
+        polygons_path = os.path.join(self.geojson_output_dir, "fmr_polygons_aina.geojson")
         
         output_paths = {}
         
@@ -754,6 +796,12 @@ class AutomaticRoadProcessor:
             centerline_wgs['width_MoE'] = self.results.get('width_MoE', '')
             centerline_wgs['image_type'] = self.results['image_type']
             centerline_wgs['processing_type'] = 'automatic'
+            centerline_wgs['method'] = self.results.get('method', 'skeleton')
+            
+            # Add fallback information if applicable
+            if 'fallback_reason' in self.results:
+                centerline_wgs['fallback_reason'] = self.results['fallback_reason']
+                centerline_wgs['skeleton_progress'] = self.results.get('skeleton_progress_percent', '')
             
             # Merge with existing centerlines
             centerlines_path = self._merge_to_geojson(
@@ -774,6 +822,7 @@ class AutomaticRoadProcessor:
             polygon_wgs['width_MoE'] = self.results.get('width_MoE', '')
             polygon_wgs['image_type'] = self.results['image_type']
             polygon_wgs['processing_type'] = 'automatic'
+            polygon_wgs['method'] = self.results.get('method', 'skeleton')
             
             # Merge with existing polygons
             polygons_path = self._merge_to_geojson(
@@ -865,10 +914,14 @@ class AutomaticRoadProcessor:
             output_paths = self.export_to_geojson()
             
             print(f"\n✓ Processing complete for {self.fmr_name}")
+            print(f"  - Method: {self.results.get('method', 'skeleton')}")
             print(f"  - Status: {self.results.get('status', 'Unknown')}")
             print(f"  - Progress: {self.results.get('progress_percent', 0):.1f}%")
             if road_mean_width:
                 print(f"  - Mean Width: {road_mean_width:.2f}m")
+            
+            if 'fallback_reason' in self.results:
+                print(f"  - Fallback reason: {self.results['fallback_reason']}")
             
             return {
                 "status": "success",
