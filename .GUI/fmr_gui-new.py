@@ -734,7 +734,19 @@ def get_matching_images():
 
 ## Added 07/28 2:04; for image-available FMR visibility
 @app.route('/get_fmrs_with_images', methods=['GET'])
- 
+def get_fmrs_with_images():
+    fmr_db_file = os.path.join(os.path.dirname(shapefile_path), "fmr_database_aina.csv")
+
+    if not os.path.exists(fmr_db_file):
+        return jsonify({"status": "error", "message": "FMR database not found"}), 404
+
+    df = pd.read_csv(fmr_db_file)
+    df = df[df["Image Path"].notna() & df["Image Path"].astype(str).str.strip().ne("")]
+
+    # Extract numeric index from "FMR" column like "FMR_0"
+    fmr_ids = df["FMR"].str.extract(r"FMR-(\d+)", expand=False).dropna().astype(int).unique().tolist()
+
+    return jsonify({"status": "success", "fmr_ids": fmr_ids})
 
 @app.route('/')
 def serve_map():
