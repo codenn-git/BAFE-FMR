@@ -833,11 +833,23 @@ def get_matching_images():
 
 ## Added 07/28 2:04; for image-available FMR visibility
 @app.route('/get_fmrs_with_images', methods=['GET'])
- 
+def get_fmrs_with_images():
+    fmr_db_file = os.path.join(os.path.dirname(shapefile_path), "fmr_database_migo.csv")
+
+    if not os.path.exists(fmr_db_file):
+        return jsonify({"status": "error", "message": "FMR database not found"}), 404
+
+    df = pd.read_csv(fmr_db_file)
+    df = df[df["Image Path"].notna() & df["Image Path"].astype(str).str.strip().ne("")]
+
+    # Extract numeric index from "FMR" column like "FMR_0"
+    fmr_ids = df["FMR"].str.extract(r"FMR-(\d+)", expand=False).dropna().astype(int).unique().tolist()
+
+    return jsonify({"status": "success", "fmr_ids": fmr_ids})
 
 @app.route('/')
 def serve_map():
-    return send_file(r"C:\Users\user-307E123400\Desktop\BAFE FMR\fmr_interactive_map.html")  # Path changed aina
+    return send_file(r"C:\Users\user-307E123400\Desktop\BAFE FMR\fmr_interactive_map.html")  # Path changed migo
 
 
 @app.route('/select', methods=['POST'])
@@ -1035,6 +1047,8 @@ def create_fmr_map(input_gdf=None):
     fmap = folium.Map(location=[center.y, center.x], zoom_start=10, tiles="Esri.WorldImagery")
 
     geo_layer_var_lines = []
+    processing_info_js_lines = []  #11/23: per-FMR processing type/status for front-end filters
+    
     for idx, row in map_gdf.iterrows():
         layer_name = f"geoLayer_{idx}"
         brgy = row.get("BRGY_NAME", "N/A")
@@ -1062,6 +1076,53 @@ def create_fmr_map(input_gdf=None):
                         bsg_info += "<br>"
             else:
                 bsg_info = "<b>BSG Images:</b> No matching images found<br><br>"
+
+        #11/23: compute latest processing type + status for this FMR (for filters)
+        proc_type_js = ""
+        status_js = ""
+
+        if fmr_database is not None and "FMR" in fmr_database.columns:
+            try:
+                # Match rows in DB for this FMR name
+                entries = fmr_database[fmr_database["FMR"].astype(str) == fmr_name]
+                if not entries.empty:
+                    latest = entries
+
+                    # Prefer most recent TIMESTAMP if available
+                    if "TIMESTAMP" in entries.columns:
+                        try:
+                            #11/23: parse legacy dd/mm/yyyy HH:MM and new yyyy-mm-dd HH:MM:SS safely
+                            ts = pd.to_datetime(entries["TIMESTAMP"], errors="coerce", dayfirst=True)
+
+                            if ts.notna().any():
+                                latest = entries.loc[[ts.idxmax()]]
+                            else:
+                                latest = entries.iloc[[-1]]
+                        except Exception:
+                            latest = entries.iloc[[-1]]
+                    else:
+                        latest = entries.iloc[[-1]]
+
+                    latest_row = latest.iloc[0]
+
+                    raw_type = str(latest_row.get("Processing Type", "")).strip().lower()
+                    raw_status = str(latest_row.get("FMR Status", "")).strip().lower()
+
+                    if "manual" in raw_type:
+                        proc_type_js = "manual"
+                    elif "auto" in raw_type:
+                        proc_type_js = "automatic"
+
+                    if "complete" in raw_status:
+                        status_js = "completed"
+                    elif "on-going" in raw_status or "ongoing" in raw_status:
+                        status_js = "on-going"
+            except Exception as e:
+                print(f"Warning building processing info for {fmr_name}: {e}")
+
+        processing_info_js_lines.append(
+            f"fmrProcessingInfo[{idx}] = {{ processingType: '{proc_type_js}', status: '{status_js}' }};"
+        )
 
         popup_html = f"""
         <div style='word-wrap: break-word; max-width: 350px;'>
@@ -1093,6 +1154,7 @@ def create_fmr_map(input_gdf=None):
         geo_layer_script = "\n".join(geo_layer_var_lines)
 
         #11/21: build script for manual centerline overlay layers (from consolidated GeoJSON)
+        ## 11/23: maybe add another for automatic centerline overlay layers para mas madaling ma-differentiate.
         manual_layer_var_lines = []
         try:
             manual_centerlines_path = os.path.join(
@@ -1102,6 +1164,14 @@ def create_fmr_map(input_gdf=None):
                 manual_gdf = gpd.read_file(manual_centerlines_path)
                 for m_idx, m_row in manual_gdf.iterrows():
                     m_layer_name = f"manualLayer_{m_idx}"
+                    ## 11/23: Only include manual entries. Ito lang naman in-add ko dito
+                    if "processing_type" in manual_gdf.columns:
+                        if str(m_row.get("processing_type", "")).strip().lower() != "manual":
+                            continue
+                    else:
+                        # If there's no processing_type column, skip (require explicit Manual tag)
+                        continue
+
                     fmr_id = m_row.get("FMR_ID", "N/A")
                     mj = folium.GeoJson(
                         m_row.geometry,
@@ -1122,7 +1192,6 @@ def create_fmr_map(input_gdf=None):
         provinces = sorted(set(p.title() for p in gdf["PROV_NAME"].dropna()))
         province_options = "".join([f"<option value='{p}'>{p}</option>" for p in provinces])
 
-
     js_ui = f"""
         <link rel="stylesheet" href="https://unpkg.com/leaflet-draw/dist/leaflet.draw.css" />
         <script src="https://unpkg.com/leaflet-draw/dist/leaflet.draw.js"></script>
@@ -1133,7 +1202,6 @@ def create_fmr_map(input_gdf=None):
         <script src="/static/fmr_ui_script.js"></script>
         
         <style>
-            /* Keep all your existing styles */
             #selection-panel {{
                 position: fixed;
                 bottom: 5px;
@@ -1385,13 +1453,67 @@ def create_fmr_map(input_gdf=None):
             </div>
         </div>
 
-        <!-- Image Toggle Button -->
+        <!--11/23: FMR Filters Button + Panel (top-right) -->
         <div class="leaflet-top leaflet-right">
-            <div class="leaflet-control leaflet-bar leaflet-control-image-toggle" title="Show FMRs with Satellite Images" onclick="toggleImageVisibility(this)">
-                <i class="fas fa-image"></i>
+            <!-- Toggle button -->
+            <div id="fmr-filter-toggle"
+                 class="leaflet-control leaflet-bar leaflet-control-custom"
+                 title="Show/hide FMR filters"
+                 onclick="toggleFMRFilterPanel()"
+                 style="background-color: #ffffff; border-radius: 4px; cursor: pointer;
+                        display: flex; align-items: center; justify-content: center;">
+                <i class="fas fa-filter"></i>
+            </div>
+
+            <!-- Collapsible filter panel -->
+            <div id="fmr-filter-panel"
+                 class="leaflet-control"
+                 style="display: none; margin-top: 4px;
+                        background: rgba(255,255,255,0.96); padding: 8px 10px;
+                        border-radius: 8px; box-shadow: 0 2px 6px rgba(0,0,0,0.35);
+                        font-size: 11px; min-width: 230px;">
+                <div style="font-weight:bold; margin-bottom: 6px;">FMR Filters</div>
+
+                <div style="margin-bottom:8px;">
+                    <div style="font-weight:bold; margin-bottom:4px; font-size:13px;">Images</div>
+                    <label style="display:flex; align-items:center; gap:6px; margin-bottom:2px;">
+                        <input type="radio" name="image-filter-mode" value="all" checked
+                               onchange="setImageFilterMode('all')">
+                        <span>All FMRs</span>
+                    </label>
+                    <label style="display:flex; align-items:center; gap:6px; margin-bottom:2px;">
+                        <input type="radio" name="image-filter-mode" value="with"
+                               onchange="setImageFilterMode('with')">
+                        <span>Only FMRs with images</span>
+                    </label>
+                    <label style="display:flex; align-items:center; gap:6px;">
+                        <input type="radio" name="image-filter-mode" value="without"
+                               onchange="setImageFilterMode('without')">
+                        <span>Only FMRs without images</span>
+                    </label>
+                </div>
+
+                <div style="margin-top:8px;">
+                    <div style="font-weight:bold; margin-bottom:4px; font-size:13px;">Processing Status</div>
+                    <label style="display:flex; align-items:center; gap:6px; margin-bottom:2px;">
+                        <input type="checkbox" id="filter-show-unprocessed" checked
+                               onchange="updateStatusFilterUnprocessed(this.checked)">
+                        <span>Unprocessed</span>
+                    </label>
+                    <label style="display:flex; align-items:center; gap:6px; margin-bottom:2px;">
+                        <input type="checkbox" id="filter-show-automatic" checked
+                               onchange="updateStatusFilterAutomatic(this.checked)">
+                        <span>Automatic</span>
+                    </label>
+                    <label style="display:flex; align-items:center; gap:6px;">
+                        <input type="checkbox" id="filter-show-manual" checked
+                               onchange="updateStatusFilterManual(this.checked)">
+                        <span>Manual</span>
+                    </label>
+                </div>
             </div>
         </div>
-        
+       
         <!-- Collapsible main controls button -->
         <div id="toggle-main-controls" 
             style="position: fixed; bottom: 5px; left: 5px; 
@@ -1407,6 +1529,18 @@ def create_fmr_map(input_gdf=None):
 
     fmap.get_root().html.add_child(folium.Element(js_ui))
 
+    #11/23: expose per-FMR processing info for front-end filters
+    if processing_info_js_lines:
+        processing_info_script = "\n".join(processing_info_js_lines)
+        fmap.get_root().html.add_child(folium.Element(f"""
+            <script>
+                window.fmrProcessingInfo = window.fmrProcessingInfo || {{}};
+                L.Map.addInitHook(function () {{
+                    {processing_info_script}
+                }});
+            </script>
+        """))
+
     fmap.get_root().html.add_child(folium.Element(f"""
         <script>
             L.Map.addInitHook(function () {{
@@ -1418,61 +1552,55 @@ def create_fmr_map(input_gdf=None):
         </script>
     """))
 
-    #11/21: Legend panel positioned under Database Status (no overlap), with spaced, bordered symbols
+    #11/23: Status legend panel under Database Status (Completed / On-going)
     fmap.get_root().html.add_child(folium.Element("""
         <script>
             L.Map.addInitHook(function () {
-                window._map = this;
-                console.log("Leaflet map initialized and exposed as window._map");
+                if (document.getElementById('status-legend')) return;
 
-                if (!document.getElementById('fmr-legend')) {
-                    var lg = document.createElement('div');
-                    lg.id = 'fmr-legend';
-                    lg.style.position = 'fixed';
-                    lg.style.background = 'rgba(255,255,255,0.96)';
-                    lg.style.padding = '8px 10px';
-                    lg.style.borderRadius = '8px';
-                    lg.style.boxShadow = '0 2px 6px rgba(0,0,0,0.35)';
-                    lg.style.font = '12px/1.4 sans-serif';
-                    lg.style.zIndex = 9999;
-                    lg.style.minWidth = '190px';
+                var lg = document.createElement('div');
+                lg.id = 'status-legend';
+                lg.style.position = 'fixed';
+                lg.style.background = 'rgba(255,255,255,0.96)';
+                lg.style.padding = '8px 10px';
+                lg.style.borderRadius = '8px';
+                lg.style.boxShadow = '0 2px 6px rgba(0,0,0,0.35)';
+                lg.style.font = '12px/1.4 sans-serif';
+                lg.style.zIndex = 9999;
+                lg.style.minWidth = '150px';
 
-                    // Legend content: extra spacing + black border around color bars
-                    lg.innerHTML =
-                        '<div style="font-weight:bold;margin-bottom:6px;">Legend</div>' +
-                        '<div style="display:flex;align-items:center;margin-bottom:6px;">' +
-                            '<span style="display:inline-block;width:22px;height:6px;border-radius:3px;' +
-                                'background:yellow;border:1px solid #000;margin-right:8px;"></span>' +
-                            '<span>Master FMR (shapefile)</span>' +
-                        '</div>' +
-                        '<div style="display:flex;align-items:center;">' +
-                            '<span style="display:inline-block;width:22px;height:6px;border-radius:3px;' +
-                                'background:red;border:1px solid #000;margin-right:8px;"></span>' +
-                            '<span>Manual centerline (GeoJSON)</span>' +
-                        '</div>';
+                lg.innerHTML =
+                    '<div style="font-weight:bold;margin-bottom:6px;">Legend</div>' +
+                    '<div style="display:flex;align-items:center;gap:6px;margin-bottom:4px;">' +
+                        '<span style="display:inline-block;width:10px;height:10px;border-radius:50%;' +
+                               'background:#2ecc71;margin-right:4px;"></span>' +
+                        '<span>Completed</span>' +
+                    '</div>' +
+                    '<div style="display:flex;align-items:center;gap:6px;">' +
+                        '<span style="display:inline-block;width:10px;height:10px;border-radius:50%;' +
+                               'background:#e74c3c;margin-right:4px;"></span>' +
+                        '<span>On-going</span>' +
+                    '</div>';
 
-                    document.body.appendChild(lg);
+                document.body.appendChild(lg);
 
-                    // Function to position legend just below Database Status
-                    var positionLegend = function () {
-                        var db = document.getElementById('database-stats');
-                        if (db) {
-                            var rect = db.getBoundingClientRect();
-                            var gapY = 10;  // vertical gap so borders don't touch
-                            lg.style.top = (rect.bottom + gapY) + 'px';
-                            lg.style.left = rect.left + 'px';
-                        } else {
-                            // Fallback if database panel not found
-                            lg.style.top = '120px';
-                            lg.style.left = '10px';
-                        }
-                    };
+                // Position legend just below the Database Status panel
+                var positionLegend = function () {
+                    var db = document.getElementById('database-stats');
+                    if (db) {
+                        var rect = db.getBoundingClientRect();
+                        var gapY = 10;
+                        lg.style.top = (rect.bottom + gapY) + 'px';
+                        lg.style.left = rect.left + 'px';
+                    } else {
+                        lg.style.top = '120px';
+                        lg.style.left = '10px';
+                    }
+                };
 
-                    // Position after layout settles + on resize
-                    setTimeout(positionLegend, 0);
-                    setTimeout(positionLegend, 150);
-                    window.addEventListener('resize', positionLegend);
-                }
+                setTimeout(positionLegend, 0);
+                setTimeout(positionLegend, 150);
+                window.addEventListener('resize', positionLegend);
             });
         </script>
     """))
