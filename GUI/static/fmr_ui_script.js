@@ -9,6 +9,13 @@ const style = document.createElement('style');
 const imageCache = {};  // key: image path, value: { base64, bounds }
 const overlayLayers = {};  // key: image path, value: leaflet layer
 
+//11/23: filters for images + processing status
+let imageFilterMode = "all";           // "all" | "with" | "without"
+let showUnprocessed = true;
+let showAutomatic = true;
+let showManual = true;
+let fmrHasImageIds = null;             // Set of FMR IDs that have at least one image
+
 let manualFMRs = [];          // { id, selectedFmrId, geometry, layer }
 let manualFMRCounter = 0;
 
@@ -608,8 +615,108 @@ window.FMRUtils = {
     getActiveOverlays,
     isImageDisplayed
 };
-let showingOnlyWithImages = false;
 
+//11/23: image filter logic (by radio group)
+function passesImageFilter(id) {
+    if (imageFilterMode === "all") return true;
+
+    const hasImage = fmrHasImageIds && fmrHasImageIds.has(id);
+    if (imageFilterMode === "with") return !!hasImage;
+    if (imageFilterMode === "without") return !hasImage;
+
+    return true;
+}
+
+//11/23: processing-status filter logic (by Processing Type)
+function passesStatusFilter(id) {
+    const info = (window.fmrProcessingInfo || {})[id] || {};
+    const pt = (info.processingType || "").toLowerCase();
+
+    if (pt === "manual")    return showManual;
+    if (pt === "automatic") return showAutomatic;
+
+    // Everything else (including empty) is treated as "unprocessed"
+    return showUnprocessed;
+}
+
+//11/23: recompute which FMR line layers are visible
+function recomputeFMRLayerVisibility() {
+    if (!window._map) return;
+
+    Object.entries(geoLayers).forEach(([key, layer]) => {
+        const id = parseInt(key.replace("geoLayer_", ""), 10);
+        if (Number.isNaN(id)) return;
+
+        const visible = passesImageFilter(id) && passesStatusFilter(id);
+
+        if (visible) {
+            if (!window._map.hasLayer(layer)) window._map.addLayer(layer);
+        } else {
+            if (window._map.hasLayer(layer)) window._map.removeLayer(layer);
+        }
+    });
+}
+
+//11/23: set the Images filter mode ("all" | "with" | "without")
+function setImageFilterMode(mode) {
+    imageFilterMode = mode;
+
+    if (mode === "all") {
+        recomputeFMRLayerVisibility();
+        return;
+    }
+
+    // For "with" or "without", we need to know which FMRs HAVE images
+    if (fmrHasImageIds) {
+        recomputeFMRLayerVisibility();
+        return;
+    }
+
+    fetch('/get_fmrs_with_images')
+        .then(res => res.json())
+        .then(data => {
+            if (data.status === "success" && Array.isArray(data.fmr_ids)) {
+                fmrHasImageIds = new Set(
+                    data.fmr_ids
+                        .map(id => parseInt(id, 10))
+                        .filter(id => !Number.isNaN(id))
+                );
+                recomputeFMRLayerVisibility();
+            } else {
+                alert("Failed to get FMRs with images: " + (data.message || "Unknown error"));
+            }
+        })
+        .catch(err => {
+            console.error("Error fetching FMRs with images:", err);
+            alert("Could not fetch FMRs with images.");
+        });
+}
+
+//11/23: update processing-status filters
+function updateStatusFilterUnprocessed(checked) {
+    showUnprocessed = checked;
+    recomputeFMRLayerVisibility();
+}
+
+function updateStatusFilterAutomatic(checked) {
+    showAutomatic = checked;
+    recomputeFMRLayerVisibility();
+}
+
+function updateStatusFilterManual(checked) {
+    showManual = checked;
+    recomputeFMRLayerVisibility();
+}
+
+//11/23: open/close the top-right filter panel
+function toggleFMRFilterPanel() {
+    const panel = document.getElementById('fmr-filter-panel');
+    if (!panel) return;
+    const isHidden = panel.style.display === '' || panel.style.display === 'none';
+    panel.style.display = isHidden ? 'block' : 'none';
+}
+
+let showingOnlyWithImages = false;
 function toggleImageVisibility(button) {
     showingOnlyWithImages = !showingOnlyWithImages;
     button.classList.toggle('active');
