@@ -196,42 +196,57 @@ class ManualRoadProcessor:
         export(self.final_binary_raster, binary_path, 'raster', 'EPSG:32651', 
                raster_transform=self.final_binary_transform)
     
+    #11/21: robust manual width measurement (handles missing vectorized roads, exports via GeoPandas)
     def measure_width(self, interval=3, tolerance=0.15, resolution=0.3):
         """Generate transects and measure road width."""
-        print(f"[{self.fmr_name}] Measuring road width...")
-        
+        print(f"[{self.fmr_name}] Measuring road width (manual)...")
+
+        if self.final_binary_raster is None or self.final_binary_transform is None:
+            print(f"[{self.fmr_name}] Warning: Binary raster not available; skipping width measurement.")
+            self.results['mean_width_m'] = None
+            return None
+
         measure = MeasureWidth(
             self.final_binary_raster,
             self.final_binary_transform,
             self.manual_centerline_metric
         )
-        
-        self.transects = measure.process(int=interval, tol=tolerance, res=resolution)
-        
+
+        # Run full MeasureWidth pipeline, but handle failures gracefully
+        try:
+            self.transects = measure.process(int=interval, tol=tolerance, res=resolution)
+        except Exception as e:
+            print(f"[{self.fmr_name}] Warning during width measurement: {e}")
+            self.transects = None
+
         if self.transects is not None and not self.transects.empty:
             road_mean_width = self.transects['width'].mean()
-            
+
             self.results['mean_width_m'] = float(road_mean_width)
             self.results['width_std'] = float(self.transects['width'].std())
             self.results['width_min'] = float(self.transects['width'].min())
             self.results['width_max'] = float(self.transects['width'].max())
-            
-            from scipy import stats
-            #calculating Margin of Error
-            n = len(self.transects['width'])
-            t_critical = stats.t.ppf(1 - 0.05 / 2, df = n - 1)
-            self.results['width_MoE'] = t_critical * (self.results['width_std']/np.sqrt(n))
 
-            # Export transects
+            from scipy import stats
+            # calculating Margin of Error
+            n = len(self.transects['width'])
+            t_critical = stats.t.ppf(1 - 0.05 / 2, df=n - 1)
+            self.results['width_MoE'] = t_critical * (self.results['width_std'] / np.sqrt(n))
+
+            # Export transects directly via GeoPandas (avoid utilv3.export CRS issues)
             transects_path = os.path.join(self.output_folder, f"{self.fmr_name}_transects.shp")
-            measure.export(transects_path, gdf=self.transects)
-            
+            try:
+                self.transects.to_file(transects_path)
+                print(f"[{self.fmr_name}] Transects exported to {transects_path}")
+            except Exception as e:
+                print(f"[{self.fmr_name}] Warning: Failed to export transects shapefile: {e}")
+
             return road_mean_width
         else:
-            print(f"[{self.fmr_name}] Warning: No valid transects found")
+            print(f"[{self.fmr_name}] Warning: No valid transects found (manual)")
             self.results['mean_width_m'] = None
             return None
-    
+
     def create_centerline(self):
         if self.manual_centerline_metric is not None and not self.manual_centerline_metric.empty:
 
@@ -612,43 +627,58 @@ class AutomaticRoadProcessor:
                raster_transform=self.final_binary_transform)
         
     
+    #11/21: robust automatic width measurement (handles missing vectorized roads, exports via GeoPandas)
     def measure_width(self, interval=3, tolerance=0.15, resolution=0.3):
         """Generate transects and measure road width."""
-        print(f"[{self.fmr_name}] Measuring road width...")
-        
+        print(f"[{self.fmr_name}] Measuring road width (automatic)...")
+
+        if self.final_binary_raster is None or self.final_binary_transform is None:
+            print(f"[{self.fmr_name}] Warning: Binary raster not available; skipping width measurement.")
+            self.results['mean_width_m'] = None
+            return None
+
         measure = MeasureWidth(
             self.final_binary_raster,
             self.final_binary_transform,
             self.fmr_gdf
         )
-        
-        self.transects = measure.process(int=interval, tol=tolerance, res=resolution)
-        
+
+        # Run full MeasureWidth pipeline, but handle failures gracefully
+        try:
+            self.transects = measure.process(int=interval, tol=tolerance, res=resolution)
+        except Exception as e:
+            print(f"[{self.fmr_name}] Warning during width measurement: {e}")
+            self.transects = None
+
         if self.transects is not None and not self.transects.empty:
             road_mean_width = self.transects['width'].mean()
-            
+
             self.results['mean_width_m'] = float(road_mean_width)
             self.results['width_std'] = float(self.transects['width'].std())
             self.results['width_min'] = float(self.transects['width'].min())
             self.results['width_max'] = float(self.transects['width'].max())
-            
+
             from scipy import stats
-            #calculating Margin of Error
+            # calculating Margin of Error
             n = len(self.transects['width'])
-            t_critical = stats.t.ppf(1 - 0.05 / 2, df = n - 1)
-            self.results['width_MoE'] = t_critical * (self.results['width_std']/np.sqrt(n))
-            
-            # Export transects
+            t_critical = stats.t.ppf(1 - 0.05 / 2, df=n - 1)
+            self.results['width_MoE'] = t_critical * (self.results['width_std'] / np.sqrt(n))
+
+            # Export transects directly via GeoPandas (avoid utilv3.export CRS issues)
             transects_path = os.path.join(self.output_folder, f"{self.fmr_name}_transects.shp")
-            measure.export(transects_path, gdf=self.transects)
-            
+            try:
+                self.transects.to_file(transects_path)
+                print(f"[{self.fmr_name}] Transects exported to {transects_path}")
+            except Exception as e:
+                print(f"[{self.fmr_name}] Warning: Failed to export transects shapefile: {e}")
+
             print(f"[{self.fmr_name}] Mean width: {road_mean_width:.2f}m")
             return road_mean_width
         else:
-            print(f"[{self.fmr_name}] Warning: No valid transects found")
+            print(f"[{self.fmr_name}] Warning: No valid transects found (automatic)")
             self.results['mean_width_m'] = None
             return None
-    
+
     def extract_centerline(self, preprocessor, spacing=5):
         """
         Extract road centerline with automatic fallback.
@@ -908,7 +938,7 @@ class AutomaticRoadProcessor:
             self.extract_centerline(preprocessor)
             
             # Step 5: Generate polygon
-            self.generate_polygon(road_mean_width, preprocessor)
+            self.generate_polygon(road_mean_width)
             
             # Step 6: Export to GeoJSON
             output_paths = self.export_to_geojson()
