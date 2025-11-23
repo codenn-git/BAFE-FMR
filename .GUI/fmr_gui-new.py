@@ -180,7 +180,11 @@ def process_fmr():  #11/07; #Need to add Width Margin of Error
                             upper = df.iloc[:insert_pos]
                             lower = df.iloc[insert_pos:]
                             new_row = pd.DataFrame([csv_updates], columns=df.columns)
-                            df = pd.concat([upper, new_row, lower], ignore_index=True)
+                            
+                            #11/21: avoid FutureWarning by excluding empty slices before concat
+                            frames = [upper, new_row, lower]
+                            frames = [frame for frame in frames if not frame.empty]
+                            df = pd.concat(frames, ignore_index=True)
                         
                         if output_paths:
                             output_paths_str = "; ".join([f"{desc}: {path}" for desc, path in output_paths.items()])
@@ -292,6 +296,101 @@ def process_fmr():  #11/07; #Need to add Width Margin of Error
         import traceback
         traceback.print_exc()
         return jsonify({"status": "error", "message": f"Processing failed: {str(e)}"}), 500  #11/07
+
+#11/21: fetch the latest manual centerline geometry for a given selected_fmr_id
+@app.route('/get_manual_centerline', methods=['POST'])
+def get_manual_centerline():
+    data = request.json or {}
+    sel_id = data.get("selected_fmr_id", None)
+
+    if sel_id is None:
+        return jsonify({
+            "status": "error",
+            "message": "selected_fmr_id is required"
+        }), 400
+
+    # Resolve FMR name from shapefile (mirror process_fmr manual logic)
+    try:
+        # sel_id may come as string or int; try both
+        try:
+            fmr_row = gdf.loc[sel_id]
+        except KeyError:
+            try:
+                fmr_row = gdf.loc[int(sel_id)]
+            except Exception:
+                return jsonify({
+                    "status": "error",
+                    "message": f"FMR with id {sel_id} not found in shapefile"
+                }), 404
+
+        if "name" in fmr_row and pd.notna(fmr_row["name"]):
+            fmr_name = str(fmr_row["name"])
+        else:
+            fmr_name = f"FMR-{sel_id}"
+    except Exception as e:
+        return jsonify({
+            "status": "error",
+            "message": f"Error resolving FMR name for id {sel_id}: {e}"
+        }), 500
+
+    # Look up latest manual centerline from consolidated GeoJSON
+    try:
+        centerlines_path = os.path.join(
+            os.path.dirname(bsg_folder), "Outputs", "fmr_centerlines_aina.geojson"
+        )
+        if not os.path.exists(centerlines_path):
+            return jsonify({
+                "status": "error",
+                "message": "No manual centerlines file found yet."
+            }), 404
+
+        manual_gdf = gpd.read_file(centerlines_path)
+        if manual_gdf.empty or "FMR_ID" not in manual_gdf.columns:
+            return jsonify({
+                "status": "error",
+                "message": "No manual centerline entries found."
+            }), 404
+
+        subset = manual_gdf[manual_gdf["FMR_ID"] == fmr_name]
+
+        # Prefer only manual processing type if column exists
+        if "processing_type" in subset.columns:
+            subset = subset[subset["processing_type"].astype(str).str.lower() == "manual"]
+
+        if subset.empty:
+            return jsonify({
+                "status": "error",
+                "message": f"No manual centerline found for FMR '{fmr_name}'."
+            }), 404
+
+        # If TIMESTAMP exists, pick latest; otherwise last row
+        if "TIMESTAMP" in subset.columns:
+            subset = subset.copy()
+            subset["__dt"] = pd.to_datetime(subset["TIMESTAMP"], errors="coerce")
+            subset = subset.sort_values("__dt")
+            row = subset.iloc[-1]
+        else:
+            row = subset.iloc[-1]
+
+        geom = row.geometry
+        if geom is None:
+            return jsonify({
+                "status": "error",
+                "message": "Manual centerline has no geometry."
+            }), 500
+
+        geom_geojson = geom.__geo_interface__
+        return jsonify({
+            "status": "success",
+            "geometry": geom_geojson,
+            "fmr_name": fmr_name
+        })
+    except Exception as e:
+        print("Error in get_manual_centerline:", e)
+        return jsonify({
+            "status": "error",
+            "message": str(e)
+        }), 500
 
 # ==========================================================
 # Database (CSV)
@@ -929,6 +1028,7 @@ def run_flask():
     """Run the Flask app using Waitress."""
     serve(app, host="127.0.0.1", port=5000)
 
+#11/21: add manual centerline overlay (GeoJSON) and legend to the generated map
 def create_fmr_map(input_gdf=None):
     map_gdf = input_gdf if input_gdf is not None else gdf
     if map_gdf.empty:
@@ -1002,9 +1102,46 @@ def create_fmr_map(input_gdf=None):
         geojson_js_var = geojson.get_name()
         geo_layer_var_lines.append(f"geoLayers['{layer_name}'] = {geojson_js_var};")
 
-    geo_layer_script = "\n".join(geo_layer_var_lines)
-    provinces = sorted(set(p.title() for p in gdf["PROV_NAME"].dropna()))
-    province_options = "".join([f"<option value='{p}'>{p}</option>" for p in provinces])
+        geo_layer_script = "\n".join(geo_layer_var_lines)
+
+        #11/21: build script for manual centerline overlay layers (from consolidated GeoJSON)
+        ## 11/23: maybe add another for automatic centerline overlay layers para mas madaling ma-differentiate.
+        manual_layer_var_lines = []
+        try:
+            manual_centerlines_path = os.path.join(
+                os.path.dirname(bsg_folder), "Outputs", "fmr_centerlines_aina.geojson"
+            )
+            if os.path.exists(manual_centerlines_path):
+                manual_gdf = gpd.read_file(manual_centerlines_path)
+                for m_idx, m_row in manual_gdf.iterrows():
+                    m_layer_name = f"manualLayer_{m_idx}"
+                    ## 11/23: Only include manual entries. Ito lang naman in-add ko dito
+                    if "processing_type" in manual_gdf.columns:
+                        if str(m_row.get("processing_type", "")).strip().lower() != "manual":
+                            continue
+                    else:
+                        # If there's no processing_type column, skip (require explicit Manual tag)
+                        continue
+
+                    fmr_id = m_row.get("FMR_ID", "N/A")
+                    mj = folium.GeoJson(
+                        m_row.geometry,
+                        name=m_layer_name,
+                        tooltip=f"Manual FMR: {fmr_id}",
+                        style_function=lambda feature: {"color": "red", "weight": 3.0},
+                    )
+                    mj.add_to(fmap)
+                    mj_js_var = mj.get_name()
+                    manual_layer_var_lines.append(
+                        f"manualCenterlineLayers['{m_layer_name}'] = {mj_js_var};"
+                    )
+        except Exception as e:
+            print(f"Error loading manual centerlines: {e}")
+
+        manual_layer_script = "\n".join(manual_layer_var_lines)
+
+        provinces = sorted(set(p.title() for p in gdf["PROV_NAME"].dropna()))
+        province_options = "".join([f"<option value='{p}'>{p}</option>" for p in provinces])
 
     js_ui = f"""
         <link rel="stylesheet" href="https://unpkg.com/leaflet-draw/dist/leaflet.draw.css" />
@@ -1016,7 +1153,6 @@ def create_fmr_map(input_gdf=None):
         <script src="/static/fmr_ui_script.js"></script>
         
         <style>
-            /* Keep all your existing styles */
             #selection-panel {{
                 position: fixed;
                 bottom: 5px;
@@ -1295,16 +1431,67 @@ def create_fmr_map(input_gdf=None):
             L.Map.addInitHook(function () {{
                 setTimeout(function () {{
                     {geo_layer_script}
+                    {manual_layer_script}  //11/21: register manual centerline layers in JS
                 }}, 0);
             }});
         </script>
     """))
 
+    #11/21: Legend panel positioned under Database Status (no overlap), with spaced, bordered symbols
     fmap.get_root().html.add_child(folium.Element("""
         <script>
             L.Map.addInitHook(function () {
                 window._map = this;
                 console.log("Leaflet map initialized and exposed as window._map");
+
+                if (!document.getElementById('fmr-legend')) {
+                    var lg = document.createElement('div');
+                    lg.id = 'fmr-legend';
+                    lg.style.position = 'fixed';
+                    lg.style.background = 'rgba(255,255,255,0.96)';
+                    lg.style.padding = '8px 10px';
+                    lg.style.borderRadius = '8px';
+                    lg.style.boxShadow = '0 2px 6px rgba(0,0,0,0.35)';
+                    lg.style.font = '12px/1.4 sans-serif';
+                    lg.style.zIndex = 9999;
+                    lg.style.minWidth = '190px';
+
+                    // Legend content: extra spacing + black border around color bars
+                    lg.innerHTML =
+                        '<div style="font-weight:bold;margin-bottom:6px;">Legend</div>' +
+                        '<div style="display:flex;align-items:center;margin-bottom:6px;">' +
+                            '<span style="display:inline-block;width:22px;height:6px;border-radius:3px;' +
+                                'background:yellow;border:1px solid #000;margin-right:8px;"></span>' +
+                            '<span>Master FMR</span>' +
+                        '</div>' +
+                        '<div style="display:flex;align-items:center;">' +
+                            '<span style="display:inline-block;width:22px;height:6px;border-radius:3px;' +
+                                'background:red;border:1px solid #000;margin-right:8px;"></span>' +
+                            '<span>Manual centerline</span>' +
+                        '</div>';
+
+                    document.body.appendChild(lg);
+
+                    // Function to position legend just below Database Status
+                    var positionLegend = function () {
+                        var db = document.getElementById('database-stats');
+                        if (db) {
+                            var rect = db.getBoundingClientRect();
+                            var gapY = 10;  // vertical gap so borders don't touch
+                            lg.style.top = (rect.bottom + gapY) + 'px';
+                            lg.style.left = rect.left + 'px';
+                        } else {
+                            // Fallback if database panel not found
+                            lg.style.top = '120px';
+                            lg.style.left = '10px';
+                        }
+                    };
+
+                    // Position after layout settles + on resize
+                    setTimeout(positionLegend, 0);
+                    setTimeout(positionLegend, 150);
+                    window.addEventListener('resize', positionLegend);
+                }
             });
         </script>
     """))
