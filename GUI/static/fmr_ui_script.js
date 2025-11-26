@@ -3,7 +3,8 @@
 
 const selectedIds = new Set();
 const geoLayers = {};
-const manualCenterlineLayers = {}; //11/21
+const manualCenterlineLayers = {};  //11/21
+const manualCenterlineMeta = {};    // 11/24
 let currentMatchingImages = {};
 const style = document.createElement('style');
 const imageCache = {};  // key: image path, value: { base64, bounds }
@@ -620,14 +621,17 @@ window.FMRUtils = {
 function passesImageFilter(id) {
     if (imageFilterMode === "all") return true;
 
+    // If we don't know which FMR this is, don't block it based on images.
+    if (id == null || Number.isNaN(id)) return true;
+
     const hasImage = fmrHasImageIds && fmrHasImageIds.has(id);
-    if (imageFilterMode === "with") return !!hasImage;
+    if (imageFilterMode === "with")    return !!hasImage;
     if (imageFilterMode === "without") return !hasImage;
 
     return true;
 }
 
-//11/23: processing-status filter logic (by Processing Type)
+//11/23: processing-status filter logic (by Processing Type) for base FMR lines
 function passesStatusFilter(id) {
     const info = (window.fmrProcessingInfo || {})[id] || {};
     const pt = (info.processingType || "").toLowerCase();
@@ -639,10 +643,11 @@ function passesStatusFilter(id) {
     return showUnprocessed;
 }
 
-//11/23: recompute which FMR line layers are visible
+//11/24: recompute which FMR layers are visible (base FMR + centerlines)
 function recomputeFMRLayerVisibility() {
     if (!window._map) return;
 
+    // 1) Base FMR polylines from the master shapefile
     Object.entries(geoLayers).forEach(([key, layer]) => {
         const id = parseInt(key.replace("geoLayer_", ""), 10);
         if (Number.isNaN(id)) return;
@@ -650,9 +655,42 @@ function recomputeFMRLayerVisibility() {
         const visible = passesImageFilter(id) && passesStatusFilter(id);
 
         if (visible) {
-            if (!window._map.hasLayer(layer)) window._map.addLayer(layer);
+            if (!window._map.hasLayer(layer)) {
+                window._map.addLayer(layer);
+            }
         } else {
-            if (window._map.hasLayer(layer)) window._map.removeLayer(layer);
+            if (window._map.hasLayer(layer)) {
+                window._map.removeLayer(layer);
+            }
+        }
+    });
+
+    // 2) Centerline overlays (manual + automatic) from fmr_centerlines_migo.geojson
+    Object.entries(manualCenterlineLayers).forEach(([key, layer]) => {
+        const meta = manualCenterlineMeta[key] || {};
+        const fmrId = meta.fmrId;
+        const procType = (meta.processingType || "").toLowerCase();
+
+        // Status filter for this overlay
+        let visibleByStatus = true;
+        if (procType === "manual")        visibleByStatus = showManual;
+        else if (procType === "automatic") visibleByStatus = showAutomatic;
+        else                               visibleByStatus = showUnprocessed;
+
+        // Image filter: only applies if we have a numeric FMR ID
+        const visibleByImage =
+            (fmrId != null && !Number.isNaN(fmrId)) ? passesImageFilter(fmrId) : true;
+
+        const visible = visibleByStatus && visibleByImage;
+
+        if (visible) {
+            if (!window._map.hasLayer(layer)) {
+                window._map.addLayer(layer);
+            }
+        } else {
+            if (window._map.hasLayer(layer)) {
+                window._map.removeLayer(layer);
+            }
         }
     });
 }
@@ -1219,8 +1257,8 @@ function drawManualLine(index, selectedFmrId) {
     if (isNew) {
       // First-time draw: nice smooth curve with some densify
       const applySmooth = true;
-      const densified = densifyLatLngs(latlngs, 1);  // ~2 m spacing
-      const smoothIterations = 4;
+      const densified = densifyLatLngs(latlngs, 4);  // ~2 m spacing
+      const smoothIterations = 8;
       finalLL = applySmooth ? smoothLineChaikin(densified, smoothIterations) : densified;
     } else {
       // Edit: do NOT densify again → avoid vertex explosion
