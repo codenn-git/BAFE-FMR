@@ -1091,8 +1091,30 @@ def create_fmr_map(input_gdf=None):
                     # Prefer most recent TIMESTAMP if available
                     if "TIMESTAMP" in entries.columns:
                         try:
-                            #11/23: parse legacy dd/mm/yyyy HH:MM and new yyyy-mm-dd HH:MM:SS safely
-                            ts = pd.to_datetime(entries["TIMESTAMP"], errors="coerce", dayfirst=True)
+                            #11/26: parse TIMESTAMP safely for mixed formats
+                            # - legacy:  dd/mm/yyyy HH:MM        (dayfirst=True)
+                            # - new:     yyyy-mm-dd HH:MM:SS      (explicit format)
+                            ts_raw = entries["TIMESTAMP"].astype(str)
+
+                            # Rows that look like YYYY-MM-DD...
+                            iso_mask = ts_raw.str.match(r"\d{4}-\d{2}-\d{2}")
+
+                            # Parse ISO-style timestamps with explicit format (no dayfirst)
+                            ts_iso = pd.to_datetime(
+                                ts_raw.where(iso_mask),
+                                errors="coerce",
+                                format="%Y-%m-%d %H:%M:%S",
+                            )
+
+                            # Parse legacy ones with dayfirst=True (dd/mm/yyyy HH:MM)
+                            ts_legacy = pd.to_datetime(
+                                ts_raw.where(~iso_mask),
+                                errors="coerce",
+                                dayfirst=True,
+                            )
+
+                            # Combine: prefer ISO parse, fall back to legacy
+                            ts = ts_iso.fillna(ts_legacy)
 
                             if ts.notna().any():
                                 latest = entries.loc[[ts.idxmax()]]
@@ -1151,46 +1173,80 @@ def create_fmr_map(input_gdf=None):
         geojson_js_var = geojson.get_name()
         geo_layer_var_lines.append(f"geoLayers['{layer_name}'] = {geojson_js_var};")
 
-        geo_layer_script = "\n".join(geo_layer_var_lines)
 
-        #11/21: build script for manual centerline overlay layers (from consolidated GeoJSON)
-        ## 11/23: maybe add another for automatic centerline overlay layers para mas madaling ma-differentiate.
-        manual_layer_var_lines = []
-        try:
-            manual_centerlines_path = os.path.join(
-                os.path.dirname(bsg_folder), "Outputs", "fmr_centerlines_migo.geojson"
-            )
-            if os.path.exists(manual_centerlines_path):
-                manual_gdf = gpd.read_file(manual_centerlines_path)
-                for m_idx, m_row in manual_gdf.iterrows():
-                    m_layer_name = f"manualLayer_{m_idx}"
-                    ## 11/23: Only include manual entries. Ito lang naman in-add ko dito
-                    if "processing_type" in manual_gdf.columns:
-                        if str(m_row.get("processing_type", "")).strip().lower() != "manual":
-                            continue
-                    else:
-                        # If there's no processing_type column, skip (require explicit Manual tag)
-                        continue
+    # 11/26: compute JS registration for base FMR layers (moved outside loop to avoid duplication/lag)
+    geo_layer_script = "\n".join(geo_layer_var_lines)
 
-                    fmr_id = m_row.get("FMR_ID", "N/A")
-                    mj = folium.GeoJson(
-                        m_row.geometry,
-                        name=m_layer_name,
-                        tooltip=f"Manual FMR: {fmr_id}",
-                        style_function=lambda feature: {"color": "red", "weight": 3.0},
+    # 11/26: build script for centerline overlay layers (manual + automatic) from consolidated GeoJSON
+    # (moved outside the per-FMR loop so we only load and draw them once)
+    manual_layer_var_lines = []
+    centerline_meta_js_lines = []  # per-layer meta: FMR ID + processing_type for filters
+
+    try:
+        manual_centerlines_path = os.path.join(
+            os.path.dirname(bsg_folder), "Outputs", "fmr_centerlines_migo.geojson"
+        )
+        if os.path.exists(manual_centerlines_path):
+            manual_gdf = gpd.read_file(manual_centerlines_path)
+
+            for m_idx, m_row in manual_gdf.iterrows():
+                m_layer_name = f"manualLayer_{m_idx}"
+
+                # Normalise processing_type
+                proc_type = str(m_row.get("processing_type", "")).strip().lower()
+                if proc_type not in ("manual", "automatic"):
+                    # skip weird/empty rows – treated as unprocessed for now
+                    continue
+
+                # Try to extract numeric FMR ID (e.g., FMR-123, FMR_123, "123")
+                raw_fmr = str(m_row.get("FMR_ID", "")).strip()
+                fmr_num = None
+                try:
+                    m = re.search(r"(\d+)", raw_fmr)
+                    if m:
+                        fmr_num = int(m.group(1))
+                except Exception:
+                    pass
+
+                # Colour by processing_type so you can visually distinguish if you want
+                color = "red" if proc_type == "manual" else "blue"
+
+                mj = folium.GeoJson(
+                    m_row.geometry,
+                    name=m_layer_name,
+                    tooltip=f"Centerline ({proc_type.title()}): {raw_fmr or 'N/A'}",
+                    style_function=lambda feature, color=color: {
+                        "color": color,
+                        "weight": 3.0,
+                    },
+                )
+                mj.add_to(fmap)
+                mj_js_var = mj.get_name()
+
+                # Register Leaflet layer in JS
+                manual_layer_var_lines.append(
+                    f"manualCenterlineLayers['{m_layer_name}'] = {mj_js_var};"
+                )
+
+                # Also register per-layer meta so filters can use processing_type + FMR ID
+                if fmr_num is not None:
+                    centerline_meta_js_lines.append(
+                        "manualCenterlineMeta['{name}'] = "
+                        "{{ fmrId: {fid}, processingType: '{ptype}' }};".format(
+                            name=m_layer_name,
+                            fid=fmr_num,
+                            ptype=proc_type,
+                        )
                     )
-                    mj.add_to(fmap)
-                    mj_js_var = mj.get_name()
-                    manual_layer_var_lines.append(
-                        f"manualCenterlineLayers['{m_layer_name}'] = {mj_js_var};"
-                    )
-        except Exception as e:
-            print(f"Error loading manual centerlines: {e}")
 
-        manual_layer_script = "\n".join(manual_layer_var_lines)
+    except Exception as e:
+        print(f"Error loading manual/automatic centerlines: {e}")
 
-        provinces = sorted(set(p.title() for p in gdf["PROV_NAME"].dropna()))
-        province_options = "".join([f"<option value='{p}'>{p}</option>" for p in provinces])
+    manual_layer_script = "\n".join(manual_layer_var_lines + centerline_meta_js_lines)
+
+    # Provinces/options only need to be computed once as well
+    provinces = sorted(set(p.title() for p in gdf["PROV_NAME"].dropna()))
+    province_options = "".join([f"<option value='{p}'>{p}</option>" for p in provinces])
 
     js_ui = f"""
         <link rel="stylesheet" href="https://unpkg.com/leaflet-draw/dist/leaflet.draw.css" />
@@ -1528,6 +1584,15 @@ def create_fmr_map(input_gdf=None):
     """
 
     fmap.get_root().html.add_child(folium.Element(js_ui))
+
+    # 11/23: expose the Leaflet map instance as window._map so filters & overlays can work
+    fmap.get_root().html.add_child(folium.Element("""
+        <script>
+            L.Map.addInitHook(function () {
+                window._map = this;
+            });
+        </script>
+    """))
 
     #11/23: expose per-FMR processing info for front-end filters
     if processing_info_js_lines:
