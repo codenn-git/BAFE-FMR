@@ -130,25 +130,35 @@ class ManualRoadProcessor:
         if self.image_type == 'BSG':
             preprocessor = Preprocessing()
             preprocessor.reproject(self.raster_path)
-        
+
             # Clip with buffer for processing (manual centerline)
             self.clipped_data, self.clipped_transform = preprocessor.clipraster(
                 vector_data=self.manual_centerline_metric,
                 buffer_dist=25,
                 bbox=False
             )
-        
+
         elif self.image_type in ['PNEO', 'SkySat']:
             preprocessor = Preprocessing(pneo=True)
             preprocessor.reproject(self.raster_path)
 
-            #Clip bounding-box
+            # Clip bounding-box for processing (manual centerline)
             self.clipped_data, self.clipped_transform = preprocessor.clipraster(
                 vector_data=self.manual_centerline_metric,
-                buffer_dist = 25,
+                buffer_dist=25,
                 bbox=True
             )
-        
+
+        # 11/27: export clipped original raster (common for all image types)
+        clipped_path = os.path.join(self.output_folder, f"{self.fmr_name}_clipped.tif")
+        export(
+            self.clipped_data,
+            clipped_path,
+            'raster',
+            'EPSG:32651',
+            raster_transform=self.clipped_transform
+        )
+
         return preprocessor
     
     def generate_binary_raster(self):
@@ -271,7 +281,7 @@ class ManualRoadProcessor:
             self.results['progress_percent'] = 0
             self.results['status'] = "Not Started"
     
-    #11/11 (aina): create polygon creation by buffering manual_centerline_metric using
+    #11/11 (migo): create polygon creation by buffering manual_centerline_metric using
     def generate_polygon(self, mean_road_width):
         """Create a road polygon by buffering the manual centerline using measured mean width."""
         if self.manual_centerline_metric is None or self.manual_centerline_metric.empty:
@@ -312,7 +322,7 @@ class ManualRoadProcessor:
         output_paths = {}
         
         # Export detected centerline
-        #11/11 (aina): export drawn centerline
+        #11/11 (migo): export drawn centerline
         if self.manual_centerline_metric is not None and not self.manual_centerline_metric.empty:
             centerline_wgs = self.manual_centerline_metric.copy().to_crs("EPSG:4326")
             
@@ -566,19 +576,29 @@ class AutomaticRoadProcessor:
             self.clipped_data, self.clipped_transform = preprocessor.clipraster(
                 vector_data=self.fmr_gdf,
                 buffer_dist=25,
-                bbox=False
+                bbox=True
             )
-        
+
         elif self.image_type in ['PNEO', 'SkySat']:
             preprocessor = Preprocessing(pneo=True)
             preprocessor.reproject(self.raster_path)
 
-            #Clip bounding-box
+            # Clip bounding-box for processing
             self.clipped_data, self.clipped_transform = preprocessor.clipraster(
                 vector_data=self.fmr_gdf,
-                buffer_dist = 25,
+                buffer_dist=25,
                 bbox=True
             )
+
+        # 11/27: export clipped original raster (common for all image types)
+        clipped_path = os.path.join(self.output_folder, f"{self.fmr_name}_clipped.tif")
+        export(
+            self.clipped_data,
+            clipped_path,
+            'raster',
+            'EPSG:32651',
+            raster_transform=self.clipped_transform
+        )
 
         return preprocessor
     
@@ -938,7 +958,7 @@ class AutomaticRoadProcessor:
             self.extract_centerline(preprocessor)
             
             # Step 5: Generate polygon
-            self.generate_polygon(road_mean_width, preprocessor)
+            self.generate_polygon(road_mean_width)
             
             # Step 6: Export to GeoJSON
             output_paths = self.export_to_geojson()
