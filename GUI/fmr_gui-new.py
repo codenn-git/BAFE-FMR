@@ -35,12 +35,95 @@ from fmr_processing import process_automatic, process_manual
 
 import matplotlib
 matplotlib.use("Agg")
-# ==========================================================
-# Paths
-shapefile_path = r"C:\Users\user-307E123400\OneDrive - Philippine Space Agency\SDMAD_SHARED\PROJECTS\SAKA\FMR\GUI\Master FMR\NE_master_fmr.shp"
-bsg_folder = r"C:\Users\user-307E123400\OneDrive - Philippine Space Agency\SDMAD_SHARED\PROJECTS\SAKA\FMR\GUI\Raster images"
 
-incremental_updater = None #stores the updater
+# =================================================
+# Configuration: remember user paths between runs
+# =================================================
+
+from pathlib import Path
+import json
+
+APP_ROOT    = Path(__file__).resolve().parent
+CONFIG_PATH = APP_ROOT / "fmr_config.json"
+
+
+def _prompt_path(description, must_be_file=False):
+    """
+    Ask user for a path via CMD until they give a valid one.
+    """
+    print("\n" + description)
+    while True:
+        user_input = input("> ").strip().strip('"')
+        if not user_input:
+            print("Please enter a path.")
+            continue
+
+        p = Path(user_input)
+
+        if must_be_file and not p.is_file():
+            print("That file does not exist. Please try again.")
+            continue
+        if not must_be_file and not p.is_dir():
+            print("That folder does not exist. Please try again.")
+            continue
+
+        return str(p)
+
+
+def load_or_create_config():
+    """
+    Load fmr_config.json if it exists.
+    If not complete, ask user for missing paths once and save them.
+    """
+    config = {}
+
+    # Try to read existing config
+    if CONFIG_PATH.exists():
+        try:
+            with open(CONFIG_PATH, "r", encoding="utf-8") as f:
+                config = json.load(f)
+        except Exception as e:
+            print(f"[WARN] Could not read config file: {e}")
+            config = {}
+
+    # Ask only for things that are missing
+    if not config.get("master_fmr_path"):
+        config["master_fmr_path"] = _prompt_path(
+            "First-time setup:\nEnter FULL PATH to the master FMR shapefile (.shp):",
+            must_be_file=True,
+        )
+
+    if not config.get("images_folder"):
+        config["images_folder"] = _prompt_path(
+            "Enter FULL PATH to the folder containing the satellite images (TIFFs):",
+            must_be_file=False,
+        )
+
+    # Where to save the interactive map HTML – default: same folder as this script
+    if not config.get("map_html_path"):
+        default_html = APP_ROOT / "fmr_interactive_map.html"
+        config["map_html_path"] = str(default_html)
+
+    # Save config back to disk so next run doesn't ask again
+    try:
+        with open(CONFIG_PATH, "w", encoding="utf-8") as f:
+            json.dump(config, f, indent=2)
+        print(f"\n[INFO] Saved configuration to {CONFIG_PATH}")
+    except Exception as e:
+        print(f"[WARN] Could not save config file: {e}")
+
+    return config
+
+
+CONFIG = load_or_create_config()
+
+# Single source of truth used everywhere below
+shapefile_path = CONFIG["master_fmr_path"]
+bsg_folder     = CONFIG["images_folder"]
+MAP_HTML_PATH  = CONFIG["map_html_path"]
+
+incremental_updater = None  # stores the updater
+# ==========================================================
 # ==========================================================
 # Flask Setup
 app = Flask(__name__)
@@ -1670,9 +1753,9 @@ def create_fmr_map(input_gdf=None):
         </script>
     """))
 
-    html_path = r"C:\Users\user-307E123400\Desktop\BAFE FMR\fmr_interactive_map.html"
+    html_path = MAP_HTML_PATH
     fmap.save(html_path)
-    print("Interactive FMR map created: fmr_interactive_map.html")
+    print(f"Interactive FMR map created: {html_path}")
     return os.path.abspath(html_path)
 
 @app.route('/check_updates', methods=['GET'])
