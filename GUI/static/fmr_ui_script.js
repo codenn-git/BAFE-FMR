@@ -3,22 +3,22 @@
 
 const selectedIds = new Set();
 const geoLayers = {};
-const manualCenterlineLayers = {};  //11/21
-const manualCenterlineMeta = {};    // 11/24
+window.geoLayers = geoLayers;
 let currentMatchingImages = {};
 const style = document.createElement('style');
 const imageCache = {};  // key: image path, value: { base64, bounds }
 const overlayLayers = {};  // key: image path, value: leaflet layer
 
-//11/23: filters for images + processing status
-let imageFilterMode = "all";           // "all" | "with" | "without"
-let showUnprocessed = true;
-let showAutomatic = true;
-let showManual = true;
-let fmrHasImageIds = null;             // Set of FMR IDs that have at least one image
-
 let manualFMRs = [];          // { id, selectedFmrId, geometry, layer }
 let manualFMRCounter = 0;
+
+// ✅ These MUST exist before the injected Folium registration script runs
+window.manualCenterlineLayers = window.manualCenterlineLayers || {};
+window.manualCenterlineMeta = window.manualCenterlineMeta || {};
+
+// Use var so it's a true global identifier (Folium injected script uses this name)
+var manualCenterlineLayers = window.manualCenterlineLayers;
+var manualCenterlineMeta = window.manualCenterlineMeta;
 
 // 08/27: Updated to use overlayKey (FMR+image) while keeping window._map safe
 function overlayImage({ image_base64, image_bounds }, overlayKey) {
@@ -292,7 +292,7 @@ function updateFMRList() {
         }
 
         const layer = geoLayers["geoLayer_" + id];
-        if (layer) layer.setStyle({color: "blue", weight: 3.5});
+        if (layer) layer.setStyle({color: "red", weight: 3.5});
     });
 }
 
@@ -616,145 +616,8 @@ window.FMRUtils = {
     getActiveOverlays,
     isImageDisplayed
 };
-
-//11/23: image filter logic (by radio group)
-function passesImageFilter(id) {
-    if (imageFilterMode === "all") return true;
-
-    // If we don't know which FMR this is, don't block it based on images.
-    if (id == null || Number.isNaN(id)) return true;
-
-    const hasImage = fmrHasImageIds && fmrHasImageIds.has(id);
-    if (imageFilterMode === "with")    return !!hasImage;
-    if (imageFilterMode === "without") return !hasImage;
-
-    return true;
-}
-
-//11/23: processing-status filter logic (by Processing Type) for base FMR lines
-function passesStatusFilter(id) {
-    const info = (window.fmrProcessingInfo || {})[id] || {};
-    const pt = (info.processingType || "").toLowerCase();
-
-    if (pt === "manual")    return showManual;
-    if (pt === "automatic") return showAutomatic;
-
-    // Everything else (including empty) is treated as "unprocessed"
-    return showUnprocessed;
-}
-
-//11/24: recompute which FMR layers are visible (base FMR + centerlines)
-function recomputeFMRLayerVisibility() {
-    if (!window._map) return;
-
-    // 1) Base FMR polylines from the master shapefile
-    Object.entries(geoLayers).forEach(([key, layer]) => {
-        const id = parseInt(key.replace("geoLayer_", ""), 10);
-        if (Number.isNaN(id)) return;
-
-        const visible = passesImageFilter(id) && passesStatusFilter(id);
-
-        if (visible) {
-            if (!window._map.hasLayer(layer)) {
-                window._map.addLayer(layer);
-            }
-        } else {
-            if (window._map.hasLayer(layer)) {
-                window._map.removeLayer(layer);
-            }
-        }
-    });
-
-    // 2) Centerline overlays (manual + automatic) from fmr_centerlines_migo.geojson
-    Object.entries(manualCenterlineLayers).forEach(([key, layer]) => {
-        const meta = manualCenterlineMeta[key] || {};
-        const fmrId = meta.fmrId;
-        const procType = (meta.processingType || "").toLowerCase();
-
-        // Status filter for this overlay
-        let visibleByStatus = true;
-        if (procType === "manual")        visibleByStatus = showManual;
-        else if (procType === "automatic") visibleByStatus = showAutomatic;
-        else                               visibleByStatus = showUnprocessed;
-
-        // Image filter: only applies if we have a numeric FMR ID
-        const visibleByImage =
-            (fmrId != null && !Number.isNaN(fmrId)) ? passesImageFilter(fmrId) : true;
-
-        const visible = visibleByStatus && visibleByImage;
-
-        if (visible) {
-            if (!window._map.hasLayer(layer)) {
-                window._map.addLayer(layer);
-            }
-        } else {
-            if (window._map.hasLayer(layer)) {
-                window._map.removeLayer(layer);
-            }
-        }
-    });
-}
-
-//11/23: set the Images filter mode ("all" | "with" | "without")
-function setImageFilterMode(mode) {
-    imageFilterMode = mode;
-
-    if (mode === "all") {
-        recomputeFMRLayerVisibility();
-        return;
-    }
-
-    // For "with" or "without", we need to know which FMRs HAVE images
-    if (fmrHasImageIds) {
-        recomputeFMRLayerVisibility();
-        return;
-    }
-
-    fetch('/get_fmrs_with_images')
-        .then(res => res.json())
-        .then(data => {
-            if (data.status === "success" && Array.isArray(data.fmr_ids)) {
-                fmrHasImageIds = new Set(
-                    data.fmr_ids
-                        .map(id => parseInt(id, 10))
-                        .filter(id => !Number.isNaN(id))
-                );
-                recomputeFMRLayerVisibility();
-            } else {
-                alert("Failed to get FMRs with images: " + (data.message || "Unknown error"));
-            }
-        })
-        .catch(err => {
-            console.error("Error fetching FMRs with images:", err);
-            alert("Could not fetch FMRs with images.");
-        });
-}
-
-//11/23: update processing-status filters
-function updateStatusFilterUnprocessed(checked) {
-    showUnprocessed = checked;
-    recomputeFMRLayerVisibility();
-}
-
-function updateStatusFilterAutomatic(checked) {
-    showAutomatic = checked;
-    recomputeFMRLayerVisibility();
-}
-
-function updateStatusFilterManual(checked) {
-    showManual = checked;
-    recomputeFMRLayerVisibility();
-}
-
-//11/23: open/close the top-right filter panel
-function toggleFMRFilterPanel() {
-    const panel = document.getElementById('fmr-filter-panel');
-    if (!panel) return;
-    const isHidden = panel.style.display === '' || panel.style.display === 'none';
-    panel.style.display = isHidden ? 'block' : 'none';
-}
-
 let showingOnlyWithImages = false;
+
 function toggleImageVisibility(button) {
     showingOnlyWithImages = !showingOnlyWithImages;
     button.classList.toggle('active');
@@ -793,60 +656,236 @@ function toggleImageVisibility(button) {
     }
 }
 
-//11/21: manual FMR row with comfortable spacing between buttons and dropdown
+// ============================================================
+// 01/06/2026: FMR Filters Panel logic (required by fmr_gui-new.py markup)
+// ============================================================
+
+let _fmrFilterPanelOpen = false;
+
+// Filters state
+let _imageFilterMode = "all"; // "all" | "with" | "without"
+let _showUnprocessed = true;
+let _showAutomatic = true;
+let _showManual = true;
+
+// Cache
+let _cachedFMRsWithImages = null; // Set of integers
+
+function toggleFMRFilterPanel() {
+    const panel = document.getElementById("fmr-filter-panel");
+    if (!panel) {
+        console.warn("FMR filter panel not found: #fmr-filter-panel");
+        return;
+    }
+
+    _fmrFilterPanelOpen = !_fmrFilterPanelOpen;
+    panel.style.display = _fmrFilterPanelOpen ? "block" : "none";
+}
+
+function setImageFilterMode(mode) {
+    _imageFilterMode = mode || "all";
+    applyFMRFilters();
+}
+
+function updateStatusFilterUnprocessed(isChecked) {
+    _showUnprocessed = !!isChecked;
+    applyFMRFilters();
+}
+
+function updateStatusFilterAutomatic(isChecked) {
+    _showAutomatic = !!isChecked;
+    applyFMRFilters();
+}
+
+function updateStatusFilterManual(isChecked) {
+    _showManual = !!isChecked;
+    applyFMRFilters();
+}
+
+async function _getFMRsWithImagesSet() {
+    if (_cachedFMRsWithImages) return _cachedFMRsWithImages;
+
+    try {
+        const res = await fetch("/get_fmrs_with_images");
+        const data = await res.json();
+
+        if (data && data.status === "success") {
+            _cachedFMRsWithImages = new Set((data.fmr_ids || []).map(v => parseInt(v)));
+            return _cachedFMRsWithImages;
+        }
+
+        console.warn("get_fmrs_with_images returned non-success:", data);
+    } catch (err) {
+        console.error("Failed to fetch /get_fmrs_with_images:", err);
+    }
+
+    _cachedFMRsWithImages = new Set();
+    return _cachedFMRsWithImages;
+}
+
+// 01-07-2026: status filter not working
+// ===========================
+// FMR FILTERS (single source of truth)
+// ===========================
+
+function _extractFmrIdFromGeoLayerKey(key, layer) {
+    const s = String(key || "");
+    const m = s.match(/(\d+)/);
+    if (m) return parseInt(m[1], 10);
+
+    // Fallback: try feature properties (works in some Leaflet/Folium layer shapes)
+    try {
+        if (layer && layer.feature && layer.feature.properties) {
+            const v = layer.feature.properties.FMR_ID ?? layer.feature.properties.fmr_id ?? layer.feature.properties.id;
+            const n = parseInt(v, 10);
+            if (Number.isFinite(n)) return n;
+        }
+        if (layer && layer._layers) {
+            for (const k in layer._layers) {
+                const sub = layer._layers[k];
+                if (sub && sub.feature && sub.feature.properties) {
+                    const v = sub.feature.properties.FMR_ID ?? sub.feature.properties.fmr_id ?? sub.feature.properties.id;
+                    const n = parseInt(v, 10);
+                    if (Number.isFinite(n)) return n;
+                }
+            }
+        }
+    } catch (e) {}
+
+    return NaN;
+}
+
+function _getProcessingTypeForFmrId(fmrId) {
+    const info = window.fmrProcessingInfo || {};
+    const entry = info[fmrId] ?? info[String(fmrId)];
+
+    let pt = "";
+
+    // Older builds might store a string directly
+    if (typeof entry === "string") pt = entry.toLowerCase().trim();
+
+    // Current build stores an object: { processingType, status }
+    if (typeof entry === "object" && entry) {
+        pt = String(entry.processingType ?? entry.processing_type ?? "").toLowerCase().trim();
+    }
+
+    // ✅ If DB info is blank, infer from existing centerline overlays
+    if (!pt) pt = _inferProcessingTypeFromCenterlines(fmrId);
+
+    return pt;
+}
+
+function _passesStatusFilter(procType) {
+    const t = String(procType || "").toLowerCase().trim();
+
+    if (!t) return _showUnprocessed;
+    if (t === "automatic") return _showAutomatic;
+    if (t === "manual") return _showManual;
+
+    return _showUnprocessed;
+}
+
+async function applyFMRFilters() {
+    if (!window._map) return;
+
+    const layers = window.geoLayers || geoLayers;
+    const withImages = await _getFMRsWithImagesSet();
+
+    // Track which FMR ids are visible (so centerlines follow the same hide/show)
+    const fmrVisible = new Map();
+
+    // ---- 1) Filter base FMR layers (yellow / main features) ----
+    for (const [key, layer] of Object.entries(layers)) {
+        const id = _extractFmrIdFromGeoLayerKey(key, layer);
+        if (!Number.isFinite(id)) continue;
+
+        const hasImages = withImages.has(id);
+        const procType = _getProcessingTypeForFmrId(id);
+
+        let visible = true;
+
+        // Image mode filter
+        if (_imageFilterMode === "with") visible = hasImages;
+        else if (_imageFilterMode === "without") visible = !hasImages;
+
+        // Processing status filter
+        if (visible) visible = _passesStatusFilter(procType);
+
+        fmrVisible.set(id, visible);
+
+        if (visible) {
+            if (!window._map.hasLayer(layer)) window._map.addLayer(layer);
+        } else {
+            if (window._map.hasLayer(layer)) window._map.removeLayer(layer);
+        }
+    }
+
+    // ---- 2) Filter centerline layers (solid automatic / dashed manual) ----
+    const clLayers = window.manualCenterlineLayers || manualCenterlineLayers || {};
+    const clMeta = window.manualCenterlineMeta || manualCenterlineMeta || {};
+
+    for (const [name, lyr] of Object.entries(clLayers)) {
+        const meta = clMeta[name] || {};
+        const fmrId = parseInt(meta.fmrId, 10);
+        const pt = String(meta.processingType || "").toLowerCase().trim();
+
+        // If meta missing, fail safe: keep visible
+        if (!Number.isFinite(fmrId) || !pt) continue;
+
+        // Only show if its processing type is allowed AND its parent FMR is visible
+        const parentVisible = fmrVisible.has(fmrId) ? fmrVisible.get(fmrId) : true;
+        const allowedByProc = _passesStatusFilter(pt);
+        const visible = parentVisible && allowedByProc;
+
+        if (visible) {
+            if (!window._map.hasLayer(lyr)) window._map.addLayer(lyr);
+        } else {
+            if (window._map.hasLayer(lyr)) window._map.removeLayer(lyr);
+        }
+    }
+}
+
+function _inferProcessingTypeFromCenterlines(fmrId) {
+    const meta = window.manualCenterlineMeta || (typeof manualCenterlineMeta !== "undefined" ? manualCenterlineMeta : {});
+    let sawAuto = false;
+
+    for (const v of Object.values(meta)) {
+        const id = parseInt(v?.fmrId ?? v?.fmr_id ?? v?.id, 10);
+        if (!Number.isFinite(id) || id !== fmrId) continue;
+
+        const pt = String(v?.processingType ?? v?.processing_type ?? "").toLowerCase().trim();
+        if (pt === "manual") return "manual";
+        if (pt === "automatic") sawAuto = true;
+    }
+
+    return sawAuto ? "automatic" : "";
+}
+
+// 8/13: modified manual FMR drawing logic
 function addManualFMRRow() {
     const index = manualFMRCounter++;
 
     const row = document.createElement('div');
-    row.id = `manual-fmr-${index}`;
     row.classList.add('manual-fmr-row');
-
-    // Force a nice horizontal layout with spacing
     row.style.display = 'flex';
     row.style.alignItems = 'center';
-    row.style.gap = '8px';          // space between each control
+    row.style.gap = '8px';
     row.style.marginBottom = '10px';
+    row.id = `manual-fmr-${index}`;
+ 
 
-    // Draw button (pencil)
+    // Draw button - pencil icon only
     const drawBtn = document.createElement('button');
     drawBtn.classList.add('draw-fmr-btn');
     drawBtn.innerHTML = '<i class="fas fa-pencil-alt"></i>';
-    drawBtn.title = 'Draw / edit centerline';
-    drawBtn.style.padding = '4px 6px';
-    drawBtn.style.marginRight = '2px';
-
+    drawBtn.title = 'Draw FMR';
     drawBtn.onclick = () => {
-        const selectEl = document.getElementById(`manual-fmr-select-${index}`);
-        if (!selectEl || !selectEl.value) {
-            alert('Please select an FMR before drawing.');
-            return;
-        }
-        const fmrId = parseInt(selectEl.value, 10);
-        if (Number.isNaN(fmrId)) {
-            alert('Invalid FMR selection.');
-            return;
-        }
+        const fmrId = parseInt(select.value);
         drawManualLine(index, fmrId);
     };
 
-    // Load previous manual line button (history icon)
-    const loadBtn = document.createElement('button');
-    loadBtn.classList.add('draw-fmr-btn');
-    loadBtn.innerHTML = '<i class="fas fa-history"></i>';
-    loadBtn.title = 'Load previous manual line for this FMR';
-    loadBtn.style.padding = '4px 6px';
-    loadBtn.style.marginRight = '2px';
-
-    loadBtn.onclick = () => loadPreviousManualLine(index);
-
     // Dropdown of selected FMRs
     const select = document.createElement('select');
-    select.id = `manual-fmr-select-${index}`;
-    select.style.minWidth = '150px';
-    select.style.padding = '2px 4px';
-    select.style.marginRight = '2px';
-
-    select.innerHTML = '<option value="">-- Select FMR --</option>';
     selectedIds.forEach(id => {
         const opt = document.createElement('option');
         opt.value = id;
@@ -854,98 +893,24 @@ function addManualFMRRow() {
         select.appendChild(opt);
     });
 
-    select.onchange = () => {
-        const val = select.value;
-        const rowInfo = manualFMRs[index];
-        if (!rowInfo) return;
-        if (!val) {
-            rowInfo.selectedFmrId = null;
-            return;
-        }
-        const fmrId = parseInt(val, 10);
-        rowInfo.selectedFmrId = Number.isNaN(fmrId) ? null : fmrId;
-    };
-
-    // Delete button (red X)
+    // Delete button - X icon only
     const deleteBtn = document.createElement('button');
     deleteBtn.classList.add('delete-fmr-btn');
     deleteBtn.innerHTML = '<i class="fas fa-times"></i>';
     deleteBtn.title = 'Remove row';
-    deleteBtn.style.padding = '4px 6px';
-
     deleteBtn.onclick = () => removeManualFMRRow(index);
 
     row.appendChild(drawBtn);
-    row.appendChild(loadBtn);
     row.appendChild(select);
     row.appendChild(deleteBtn);
-
     document.getElementById('manual-fmr-container').appendChild(row);
 
-    // track this row
-    manualFMRs[index] = { id: index, selectedFmrId: null, geometry: null };
+    manualFMRs.push({ id: index, selectedFmrId: null, geometry: null });
 }
 
 function removeManualFMRRow(index) {
-  const rowEl = document.getElementById(`manual-fmr-${index}`);
-  if (rowEl) {
-    rowEl.remove();
-  }
-  manualFMRs = manualFMRs.filter(f => f.id !== index);
-}
-
-//11/21: load latest manual centerline for the selected FMR from backend and enter edit mode
-function loadPreviousManualLine(index) {
-  const rowInfo = manualFMRs.find(f => f.id === index);
-  if (!rowInfo) {
-    alert('Manual row not found.');
-    return;
-  }
-
-  // Resolve selected FMR ID
-  let selectedFmrId = rowInfo.selectedFmrId;
-  if (selectedFmrId == null) {
-    const selectEl = document.getElementById(`manual-fmr-select-${index}`);
-    if (selectEl && selectEl.value) {
-      const parsed = parseInt(selectEl.value, 10);
-      if (!Number.isNaN(parsed)) {
-        selectedFmrId = parsed;
-        rowInfo.selectedFmrId = parsed;
-      }
-    }
-  }
-
-  if (selectedFmrId == null || Number.isNaN(selectedFmrId)) {
-    alert('Please select an FMR first before loading a previous line.');
-    return;
-  }
-
-  fetch('/get_manual_centerline', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ selected_fmr_id: selectedFmrId })
-  })
-    .then(res => res.json())
-    .then(data => {
-      if (data.status !== 'success') {
-        alert(data.message || 'No saved manual line found for this FMR.');
-        return;
-      }
-
-      const geom = data.geometry;
-      if (!geom || geom.type !== 'LineString' || !Array.isArray(geom.coordinates)) {
-        alert('Invalid geometry returned for this FMR.');
-        return;
-      }
-
-      // Store geometry into this row and immediately enter draw/edit mode
-      rowInfo.geometry = geom;
-      drawManualLine(index, selectedFmrId);
-    })
-    .catch(err => {
-      console.error('Error loading manual centerline:', err);
-      alert('Error loading previous manual line. See console for details.');
-    });
+    document.getElementById(`manual-fmr-${index}`).remove();
+    manualFMRs = manualFMRs.filter(f => f.id !== index);
 }
 
 // ============================================================================
@@ -1042,83 +1007,78 @@ function removeMeasureTooltip() { //11/03: new
 // Manual Drawing — Hotkeys (ESC/Enter/Backspace/Arrows)
 // ============================================================================
 
-//11/21: respect ctx.mode so edit-mode only uses ESC/Enter, not Backspace/Arrows
-function attachManualDrawHotkeys(ctx) {
-  const onKeyDown = (e) => {
-    if (!ctx.active) return;
-    const key = e.key || '';
-    const isEsc = key === 'Escape' || key === 'Esc' || e.keyCode === 27;
-    const isBackspace = key === 'Backspace' || e.keyCode === 8;
-    const isEnter = key === 'Enter' || e.keyCode === 13;
+//11/03: robust hotkeys; ESC reliably cancels across browsers
+function attachManualDrawHotkeys(ctx) { //11/03: updated
+  const onKeyDown = (e) => { //11/03: new
+    if (!ctx.active) return; //11/03: keep
+    const key = e.key || ''; //11/03: new
+    const isEsc = key === 'Escape' || key === 'Esc' || e.keyCode === 27; //11/03: new
+    const isBackspace = key === 'Backspace' || e.keyCode === 8; //11/03: new
+    const isEnter = key === 'Enter' || e.keyCode === 13; //11/03: new
     const isArrow = ['ArrowUp','ArrowDown','ArrowLeft','ArrowRight'].includes(key) ||
-                    [37,38,39,40].includes(e.keyCode);
-
-    const inEditMode = ctx.mode === 'edit';
+                    [37,38,39,40].includes(e.keyCode); //11/03: new
 
     // Prevent other handlers (or the browser) from swallowing the event
-    if (isEsc || isBackspace || isEnter || isArrow) {
-      e.preventDefault(); e.stopPropagation();
-    }
+    if (isEsc || isBackspace || isEnter || isArrow) { //11/03: new
+      e.preventDefault(); e.stopPropagation(); //11/03: new
+    } //11/03: new
 
-    if (isEsc) {
+    if (isEsc) { //11/03: changed (supports Escape/Esc/27)
       // Cancel drawing: remove temp polyline, HUD, listeners, and restore styles
-      try { if (ctx.layer) window._map.removeLayer(ctx.layer); } catch(_) {}
-      try { window._map.off('click', ctx._onClick); window._map.off('mousemove', ctx._onMove); } catch(_) {}
-      try { if (ctx._restore) ctx._restore.forEach(fn => fn()); } catch(_) {}
-      try { removeMeasureTooltip(); } catch(_) {}
-      ctx.active = false;
-      toggleDrawingUI(false);
-      hideManualBanner();
-      if (ctx._detachHotkeys) ctx._detachHotkeys();
-      setManualCursor(false);
-      return;
+      try { if (ctx.layer) window._map.removeLayer(ctx.layer); } catch(_){} //11/03: new
+      try { window._map.off('click', ctx._onClick); window._map.off('mousemove', ctx._onMove); } catch(_){} //11/03: new
+      try { if (ctx._restore) ctx._restore.forEach(fn => fn()); } catch(_){} //11/03: new
+      try { removeMeasureTooltip(); } catch(_){} //11/03: new
+      ctx.active = false; //11/03: keep
+      toggleDrawingUI(false); //11/03: keep
+      hideManualBanner(); //11/05: new
+      if (ctx._detachHotkeys) ctx._detachHotkeys(); //11/03: new
+      setManualCursor(false); //11/05
+      return; //11/03: new
     }
 
-    if (isEnter) {
+    if (isEnter) { //11/03: keep
       if (ctx.layer && ctx.latlngs.length >= 2) {
-        hideManualBanner();
+        hideManualBanner(); //11/05: new
         setManualCursor(false);
-        if (ctx._detachHotkeys) ctx._detachHotkeys();
-        ctx.finish();
+        if (ctx._detachHotkeys) ctx._detachHotkeys(); //11/03: new
+        ctx.finish(); //11/03: keep
       }
-      return;
+      return; //11/03: new
     }
 
-    // In edit mode, ignore Backspace & Arrow logic
-    if (inEditMode) return;
-
-    if (isBackspace) {
+    if (isBackspace) { //11/03: keep
       if (ctx.latlngs.length > 1) {
-        ctx.latlngs.pop();
-        ctx.layer.setLatLngs(ctx.latlngs);
-        updateMeasureTooltipText(measurePolylineMeters(ctx.latlngs));
+        ctx.latlngs.pop(); //11/03: keep
+        ctx.layer.setLatLngs(ctx.latlngs); //11/03: keep
+        updateMeasureTooltipText(measurePolylineMeters(ctx.latlngs)); //11/03: keep
       }
-      return;
+      return; //11/03: new
     }
 
-    if (isArrow) {
-      if (!ctx.latlngs.length) return;
-      const step = 0.000003; // ~0.3 m-ish
-      const kc = e.keyCode;
-      let last = ctx.latlngs[ctx.latlngs.length - 1];
-      if (key === 'ArrowUp' || kc === 38)    last = L.latLng(last.lat + step, last.lng);
-      if (key === 'ArrowDown' || kc === 40)  last = L.latLng(last.lat - step, last.lng);
-      if (key === 'ArrowLeft' || kc === 37)  last = L.latLng(last.lat, last.lng - step);
-      if (key === 'ArrowRight' || kc === 39) last = L.latLng(last.lat, last.lng + step);
-      ctx.latlngs[ctx.latlngs.length - 1] = last;
-      ctx.layer.setLatLngs(ctx.latlngs);
-      updateMeasureTooltipText(measurePolylineMeters(ctx.latlngs));
+    if (isArrow) { //11/03: keep
+      if (!ctx.latlngs.length) return; //11/03: keep
+      const step = 0.000003; // ~0.3 m-ish //11/03: keep
+      const kc = e.keyCode; //11/03: new
+      let last = ctx.latlngs[ctx.latlngs.length - 1]; //11/03: keep
+      if (key === 'ArrowUp' || kc === 38)    last = L.latLng(last.lat + step, last.lng); //11/03: new
+      if (key === 'ArrowDown' || kc === 40)  last = L.latLng(last.lat - step, last.lng); //11/03: new
+      if (key === 'ArrowLeft' || kc === 37)  last = L.latLng(last.lat, last.lng - step); //11/03: new
+      if (key === 'ArrowRight' || kc === 39) last = L.latLng(last.lat, last.lng + step); //11/03: new
+      ctx.latlngs[ctx.latlngs.length - 1] = last; //11/03: keep
+      ctx.layer.setLatLngs(ctx.latlngs); //11/03: keep
+      updateMeasureTooltipText(measurePolylineMeters(ctx.latlngs)); //11/03: keep
     }
-  };
+  }; //11/03: new
 
   // Listen on document (captures more cases); use capture phase to beat other handlers
-  document.addEventListener('keydown', onKeyDown, true);
+  document.addEventListener('keydown', onKeyDown, true); //11/03: new
 
   // Provide a cleanup hook so callers can detach reliably
-  ctx._detachHotkeys = () => {
-    document.removeEventListener('keydown', onKeyDown, true);
-    ctx._detachHotkeys = null;
-  };
+  ctx._detachHotkeys = () => { //11/03: new
+    document.removeEventListener('keydown', onKeyDown, true); //11/03: new
+    ctx._detachHotkeys = null; //11/03: new
+  }; //11/03: new
 }
 
 // ============================================================================
@@ -1148,163 +1108,71 @@ function hideManualBanner() { // 11/03: new
 // Manual Drawing — Core (drawManualLine)
 // ============================================================================
 
-//11/21: unified manual draw/edit (point-append) with bounded vertices to avoid slowdown
-function drawManualLine(index, selectedFmrId) {
-  const rowInfo = manualFMRs[index];
-  if (!rowInfo) return;
+//11/03: Enhanced manual drawing UX (uses HUD Option B)
+function drawManualLine(index, selectedFmrId) { //11/03: upgraded
+    manualFMRs[index].selectedFmrId = selectedFmrId; //11/03: keep
+    toggleDrawingUI(true); //11/03: keep
+    showManualBanner(); //11/05: new
+    setManualCursor(true); //11/05: new    
+    const restoreFns = []; //11/03: new
+    Object.values(geoLayers).forEach(layer => { //11/03: new
+    if (layer.setStyle) { //11/03: new
+        const prev = { ...layer.options }; //11/03: new
+        restoreFns.push(() => { try { layer.setStyle(prev); } catch(e){} }); //11/03: new
+        try { layer.setStyle({ color: '#999', weight: 1, opacity: 0.5 }); } catch(e){} //11/03: new
+    } //11/03: new
+    });
 
-  rowInfo.selectedFmrId = selectedFmrId;
-  toggleDrawingUI(true);
-  showManualBanner();
-  setManualCursor(true);
+    const latlngs = []; //11/03: new
+    const poly = L.polyline([], { color: '#00d', weight: 3, opacity: 0.95 }).addTo(window._map); //11/03: new
 
-  const restoreFns = [];
-  Object.values(geoLayers).forEach(layer => {
-    if (layer.setStyle) {
-      const prev = { ...layer.options };
-      restoreFns.push(() => { try { layer.setStyle(prev); } catch (e) {} });
-      try {
-        layer.setStyle({ color: '#999', weight: 1, opacity: 0.5 });
-      } catch (e) {}
-    }
-  });
+    updateMeasureTooltipText(0); //11/03: new
 
-  const latlngs = [];
-  let poly = null;
-  const MAX_EDIT_VERTICES = 300; // hard cap so geometries don't explode
-
-  // Detect if this row already has a saved geometry
-  const hasExisting =
-    rowInfo.geometry &&
-    rowInfo.geometry.type === 'LineString' &&
-    Array.isArray(rowInfo.geometry.coordinates);
-
-  // Start from existing geometry (but downsample if it's too dense)
-  if (hasExisting) {
-    const coords = rowInfo.geometry.coordinates; // [lng, lat]
-    const baseLatLngs = coords.map(([lng, lat]) => L.latLng(lat, lng));
-
-    if (baseLatLngs.length > MAX_EDIT_VERTICES) {
-      const sampled = [];
-      const step = (baseLatLngs.length - 1) / (MAX_EDIT_VERTICES - 1);
-      for (let i = 0; i < MAX_EDIT_VERTICES; i++) {
-        const idx = Math.round(i * step);
-        sampled.push(baseLatLngs[idx]);
-      }
-      sampled.forEach(ll => latlngs.push(ll));
-    } else {
-      baseLatLngs.forEach(ll => latlngs.push(ll));
-    }
-  }
-
-  // Create the working polyline (blank for new FMR; prefilled for edit)
-  poly = L.polyline(latlngs, { color: '#00d', weight: 3, opacity: 0.95 }).addTo(window._map);
-  poly.bringToFront();
-  updateMeasureTooltipText(measurePolylineMeters(latlngs));
-
-  const ctx = {
+    const ctx = { //11/03: new
     layer: poly,
     latlngs,
     active: true,
-    _onClick: null,
-    _onMove: null,
+    _onClick: onClick,
+    _onMove: onMove,
     _restore: restoreFns,
-    mode: 'draw',          // treat edit as draw so Backspace/Arrows still work
-    finish: null,
-    _detachHotkeys: null
-  };
+    finish: () => { //11/03: new
+        if (latlngs.length < 2) return; //11/03: new
+        const applySmooth = true; //11/03: new
+        const densified = densifyLatLngs(latlngs, 2); //11/03: new
+        const finalLL = applySmooth ? smoothLineChaikin(densified, 1) : densified; //11/03: new
+        poly.setLatLngs(finalLL); //11/03: new
 
-  // Click: append a new point to the end (same behavior for new + edit)
-  function onClick(e) {
-    latlngs.push(e.latlng);
-    poly.setLatLngs(latlngs);
-    poly.bringToFront();
-    updateMeasureTooltipText(measurePolylineMeters(latlngs));
-    if (e.originalEvent) {
-      moveMeasureTooltip(e.originalEvent.clientX, e.originalEvent.clientY);
+        const coords = finalLL.map(ll => [ll.lng, ll.lat]); //11/03: new
+        manualFMRs[index].geometry = { type: 'LineString', coordinates: coords }; //11/03: new
+
+        updateMeasureTooltipText(measurePolylineMeters(finalLL)); //11/03: new
+        window._map.off('click', onClick); window._map.off('mousemove', onMove); //11/03: new
+        ctx.active = false; //11/03: new
+        restoreFns.forEach(fn => fn()); //11/03: new
+        toggleDrawingUI(false); //11/03: new
+        removeMeasureTooltip(); //11/03: new
+        hideManualBanner(); //11/05
     }
-  }
+  }; //11/03: new
 
-  // Mouse move: ghost segment from last point to cursor
-  function onMove(e) {
-    if (!latlngs.length) {
-      if (e.originalEvent) {
-        moveMeasureTooltip(e.originalEvent.clientX, e.originalEvent.clientY);
-      }
-      return;
-    }
-    const tmp = [...latlngs, e.latlng];
-    poly.setLatLngs(tmp);
-    poly.bringToFront();
-    updateMeasureTooltipText(measurePolylineMeters(tmp));
-    if (e.originalEvent) {
-      moveMeasureTooltip(e.originalEvent.clientX, e.originalEvent.clientY);
-    }
-  }
+  function onClick(e) { //11/03: new
+    latlngs.push(e.latlng); //11/03: new
+    poly.setLatLngs(latlngs); //11/03: new
+    updateMeasureTooltipText(measurePolylineMeters(latlngs)); //11/03: new
+    if (e.originalEvent) moveMeasureTooltip(e.originalEvent.clientX, e.originalEvent.clientY); //11/03: new
+  } //11/03: new
 
-  ctx._onClick = onClick;
-  ctx._onMove = onMove;
+  function onMove(e) { //11/03: new
+    if (!latlngs.length) { if (e.originalEvent) moveMeasureTooltip(e.originalEvent.clientX, e.originalEvent.clientY); return; } //11/03: new
+    const tmp = [...latlngs, e.latlng]; //11/03: new
+    poly.setLatLngs(tmp); //11/03: new
+    updateMeasureTooltipText(measurePolylineMeters(tmp)); //11/03: new
+    if (e.originalEvent) moveMeasureTooltip(e.originalEvent.clientX, e.originalEvent.clientY); //11/03: new
+  } //11/03: new
 
-  window._map.on('click', onClick);
-  window._map.on('mousemove', onMove);
-
-  ctx.finish = () => {
-    if (latlngs.length < 2) return;
-
-    const isNew = !hasExisting;
-    let finalLL;
-
-    if (isNew) {
-      // First-time draw: nice smooth curve with some densify
-      const applySmooth = true;
-      const densified = densifyLatLngs(latlngs, 4);  // ~2 m spacing
-      const smoothIterations = 8;
-      finalLL = applySmooth ? smoothLineChaikin(densified, smoothIterations) : densified;
-    } else {
-      // Edit: do NOT densify again → avoid vertex explosion
-      // Light smoothing only, then cap vertices if still too high
-      let working = latlngs.slice();
-      const applySmooth = true;
-      const smoothIterations = 1; // gentle smoothing
-      if (applySmooth) {
-        working = smoothLineChaikin(working, smoothIterations);
-      }
-
-      if (working.length > MAX_EDIT_VERTICES) {
-        const sampled = [];
-        const step = (working.length - 1) / (MAX_EDIT_VERTICES - 1);
-        for (let i = 0; i < MAX_EDIT_VERTICES; i++) {
-          const idx = Math.round(i * step);
-          sampled.push(working[idx]);
-        }
-        working = sampled;
-      }
-
-      finalLL = working;
-    }
-
-    poly.setLatLngs(finalLL);
-    poly.bringToFront();
-
-    rowInfo.geometry = {
-      type: 'LineString',
-      coordinates: finalLL.map(ll => [ll.lng, ll.lat])
-    };
-
-    updateMeasureTooltipText(measurePolylineMeters(finalLL));
-
-    window._map.off('click', onClick);
-    window._map.off('mousemove', onMove);
-    ctx.active = false;
-    restoreFns.forEach(fn => fn());
-    toggleDrawingUI(false);
-    removeMeasureTooltip();
-    hideManualBanner();
-    setManualCursor(false);
-    if (ctx._detachHotkeys) ctx._detachHotkeys();
-  };
-
-  attachManualDrawHotkeys(ctx);
+  window._map.on('click', onClick); //11/03: new
+  window._map.on('mousemove', onMove); //11/03: new
+  attachManualDrawHotkeys(ctx); //11/03: new
 }
 
 function toggleManualSection() {
