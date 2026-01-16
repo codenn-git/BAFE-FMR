@@ -166,7 +166,7 @@ def process_fmr():  #11/07; #Need to add Width Margin of Error
 
     try:
         # CSV database path (shared)
-        fmr_db_file = os.path.join(os.path.dirname(shapefile_path), "fmr_database_migo.csv")  #11/07
+        fmr_db_file = os.path.join(os.path.dirname(shapefile_path), "fmr_database.csv")  #11/07
 
         def _ensure_csv_columns(df):  #11/07
             cols = [
@@ -228,7 +228,7 @@ def process_fmr():  #11/07; #Need to add Width Margin of Error
             
             # Update CSV database
             if processing_result.get("status") == "success":
-                fmr_db_file = os.path.join(os.path.dirname(shapefile_path), "fmr_database_migo.csv")
+                fmr_db_file = os.path.join(os.path.dirname(shapefile_path), "fmr_database.csv")
                 if os.path.exists(fmr_db_file):
                     try:
                         df = pd.read_csv(fmr_db_file)
@@ -294,7 +294,7 @@ def process_fmr():  #11/07; #Need to add Width Margin of Error
             fmr_name = str(fmr_row["name"]) if ("name" in fmr_row and pd.notna(fmr_row["name"])) else f"FMR-{fmr_id}"
 
             if not image_path:
-                fmr_db_alt = os.path.join(os.path.dirname(shapefile_path), "fmr_database_migo.csv")
+                fmr_db_alt = os.path.join(os.path.dirname(shapefile_path), "fmr_database.csv")
                 if os.path.exists(fmr_db_alt):
                     fmr_database = pd.read_csv(fmr_db_alt)
                     fmr_entry = fmr_database[fmr_database["FMR"] == fmr_name]
@@ -327,7 +327,7 @@ def process_fmr():  #11/07; #Need to add Width Margin of Error
         # AUTOMATIC CSV update
         # ----------------------------
         if processing_result.get("status") == "success":
-            fmr_db_file2 = os.path.join(os.path.dirname(shapefile_path), "fmr_database_migo.csv")
+            fmr_db_file2 = os.path.join(os.path.dirname(shapefile_path), "fmr_database.csv")
             if os.path.exists(fmr_db_file2):
                 try:
                     df = pd.read_csv(fmr_db_file2)
@@ -419,7 +419,7 @@ def get_manual_centerline():
     # Look up latest manual centerline from consolidated GeoJSON
     try:
         centerlines_path = os.path.join(
-            os.path.dirname(bsg_folder), "Outputs", "fmr_centerlines_migo.geojson"
+            os.path.dirname(bsg_folder), "Outputs", "fmr_centerlines.geojson"
         )
         if not os.path.exists(centerlines_path):
             return jsonify({
@@ -488,7 +488,7 @@ def getDatabase():
 
     master_fmr = shapefile_path
     bsg_folder_path = bsg_folder
-    fmr_db_file = os.path.join(os.path.dirname(master_fmr), "fmr_database_migo.csv")
+    fmr_db_file = os.path.join(os.path.dirname(master_fmr), "fmr_database.csv")
 
     # Load FMRs in EPSG:32651
     fmr_gdf = gpd.read_file(master_fmr).to_crs("EPSG:32651")
@@ -505,26 +505,51 @@ def getDatabase():
     else:
         existing_df = pd.DataFrame()
         existing_keys = set()
+        run_keys = set()
 
-    # === Part 1: Preload raster bounds and reproject to EPSG:32651 ===
+    # 01/06/2026: === Part 1: Preload raster bounds and reproject to EPSG:32651 ===
     raster_bounds_dict = {}
-    for tif_file in os.listdir(bsg_folder_path):
-        if not tif_file.endswith("Tiff.tif"):
-            continue
-        tif_path = os.path.join(bsg_folder_path, tif_file)
-        try:
-            with rasterio.open(tif_path) as src:
-                minx, miny, maxx, maxy = src.bounds
-                minx_t, miny_t = raster_to_fmr_crs.transform(minx, miny)
-                maxx_t, maxy_t = raster_to_fmr_crs.transform(maxx, maxy)
-                reprojected_bounds = box(minx_t, miny_t, maxx_t, maxy_t)
-                raster_bounds_dict[tif_file] = {
-                    "path": tif_path,
-                    "bounds_geom": reprojected_bounds
-                }
-        except Exception as e:
-            print(f"Error reading {tif_file}: {e}")
-            continue
+
+    for root, _, files in os.walk(bsg_folder_path):
+        for tif_file in files:
+            n = tif_file.lower()
+
+            # accept .tif/.tiff, skip aux sidecars
+            if not n.endswith((".tif", ".tiff")):
+                continue
+            if n.endswith((".tif.aux", ".tif.aux.xml", ".tiff.aux", ".tiff.aux.xml")):
+                continue
+
+            # optional: keep your original intent (only BSG "Tiff" products)
+            # comment this out if you want ALL tif/tiff files included
+            if "tiff" not in n:
+                continue
+
+            tif_path = os.path.join(root, tif_file)
+
+            try:
+                with rasterio.open(tif_path) as src:
+                    minx, miny, maxx, maxy = src.bounds
+
+                    # more robust than assuming EPSG:4326
+                    if src.crs is None:
+                        continue
+                    raster_to_fmr_crs = Transformer.from_crs(src.crs, fmr_gdf.crs, always_xy=True)
+
+                    minx_t, miny_t = raster_to_fmr_crs.transform(minx, miny)
+                    maxx_t, maxy_t = raster_to_fmr_crs.transform(maxx, maxy)
+                    reprojected_bounds = box(minx_t, miny_t, maxx_t, maxy_t)
+
+                    # use full path as key to avoid collisions across subfolders
+                    raster_bounds_dict[tif_path] = {
+                        "file": tif_file,
+                        "path": tif_path,
+                        "bounds_geom": reprojected_bounds
+                    }
+
+            except Exception as e:
+                print(f"Error reading {tif_path}: {e}")
+                continue
 
     # === Part 2: For each FMR, log all raster matches ===
     results = []
@@ -535,8 +560,10 @@ def getDatabase():
 
         matched = False
 
-        for tif_file, data in raster_bounds_dict.items():
+        for tif_path, data in raster_bounds_dict.items():
+            tif_file = data["file"]
             tif_path = data["path"]
+
 
             try:
                 with rasterio.open(tif_path) as src:
@@ -584,7 +611,9 @@ def getDatabase():
                 formatted_date, formatted_time = "", ""
 
             # Skip duplicates before appending
-            if (fmr_name, tif_file, formatted_date) in existing_keys:
+            k = (fmr_name, tif_file, formatted_date)
+
+            if k in existing_keys or k in run_keys:
                 continue
 
             results.append({
@@ -601,6 +630,8 @@ def getDatabase():
                 "Processing Type": "",
                 "Image Path": tif_path
             })
+
+            run_keys.add(k)
 
         if not matched:
             # Check if this FMR already exists in DB with BSG=None
@@ -646,6 +677,19 @@ def getDatabase():
     # else:
     #     final_df = results_df
     #----- end
+
+    # 01/06/2026: Try ko lang ito HAHAHAHAHA
+    if not existing_df.empty:
+        for col in existing_df.columns:
+            if col not in results_df.columns:
+                results_df[col] = ""
+        for col in results_df.columns:
+            if col not in existing_df.columns:
+                existing_df[col] = ""
+
+        final_df = pd.concat([existing_df, results_df], ignore_index=True)
+    else:
+        final_df = results_df.copy()
 
     final_df["FMR_INDEX"] = final_df["FMR"].str.extract(r"(\d+)", expand=False).astype(int)
     final_df["Date"] = pd.to_datetime(final_df["Date"], errors="coerce")
@@ -882,7 +926,7 @@ def get_matching_images():
     data = request.json
     fmr_id = data.get("fmr_id")
     fmr_name = str(gdf.loc[fmr_id].get("name", f"FMR-{fmr_id}"))
-    fmr_db_file = os.path.join(os.path.dirname(shapefile_path), "fmr_database_migo.csv")
+    fmr_db_file = os.path.join(os.path.dirname(shapefile_path), "fmr_database.csv")
 
     if not os.path.exists(fmr_db_file):
         return jsonify({"status": "error", "message": "FMR database not found"}), 404
@@ -917,7 +961,7 @@ def get_matching_images():
 ## Added 07/28 2:04; for image-available FMR visibility
 @app.route('/get_fmrs_with_images', methods=['GET'])
 def get_fmrs_with_images():
-    fmr_db_file = os.path.join(os.path.dirname(shapefile_path), "fmr_database_migo.csv")
+    fmr_db_file = os.path.join(os.path.dirname(shapefile_path), "fmr_database.csv")
 
     if not os.path.exists(fmr_db_file):
         return jsonify({"status": "error", "message": "FMR database not found"}), 404
@@ -932,7 +976,9 @@ def get_fmrs_with_images():
 
 @app.route('/')
 def serve_map():
-    return send_file(r"C:\Users\user-307E123400\Desktop\BAFE FMR\fmr_interactive_map.html")  # Path changed migo
+    if not os.path.exists(MAP_HTML_PATH):
+        create_fmr_map()
+    return send_file(os.path.abspath(MAP_HTML_PATH))
 
 
 @app.route('/select', methods=['POST'])
@@ -1118,7 +1164,7 @@ def create_fmr_map(input_gdf=None):
         print("Shapefile is empty!")
         return ""
 
-    fmr_db_file = os.path.join(os.path.dirname(shapefile_path), "fmr_database_migo.csv")
+    fmr_db_file = os.path.join(os.path.dirname(shapefile_path), "fmr_database.csv")
     fmr_database = None
     if os.path.exists(fmr_db_file):
         try:
@@ -1128,6 +1174,14 @@ def create_fmr_map(input_gdf=None):
 
     center = map_gdf.unary_union.centroid
     fmap = folium.Map(location=[center.y, center.x], zoom_start=10, tiles="Esri.WorldImagery")
+
+    # --- Province filter: auto-pan/zoom to current (possibly filtered) dataset ---
+    try:
+        minx, miny, maxx, maxy = map_gdf.total_bounds
+        if np.isfinite([minx, miny, maxx, maxy]).all() and (minx != maxx) and (miny != maxy):
+            fmap.fit_bounds([[miny, minx], [maxy, maxx]])
+    except Exception as e:
+        print(f"[create_fmr_map] fit_bounds skipped: {e}")
 
     geo_layer_var_lines = []
     processing_info_js_lines = []  #11/23: per-FMR processing type/status for front-end filters
@@ -1254,7 +1308,7 @@ def create_fmr_map(input_gdf=None):
         geojson.add_to(fmap)
 
         geojson_js_var = geojson.get_name()
-        geo_layer_var_lines.append(f"geoLayers['{layer_name}'] = {geojson_js_var};")
+        geo_layer_var_lines.append(f"geoLayers['geoLayer_{idx}'] = {geojson_js_var};")
 
 
     # 11/26: compute JS registration for base FMR layers (moved outside loop to avoid duplication/lag)
@@ -1267,7 +1321,7 @@ def create_fmr_map(input_gdf=None):
 
     try:
         manual_centerlines_path = os.path.join(
-            os.path.dirname(bsg_folder), "Outputs", "fmr_centerlines_migo.geojson"
+            os.path.dirname(bsg_folder), "Outputs", "fmr_centerlines.geojson"
         )
         if os.path.exists(manual_centerlines_path):
             manual_gdf = gpd.read_file(manual_centerlines_path)
@@ -1291,18 +1345,38 @@ def create_fmr_map(input_gdf=None):
                 except Exception:
                     pass
 
-                # Colour by processing_type so you can visually distinguish if you want
-                color = "red" if proc_type == "manual" else "blue"
+                # Color by STATUS to match the status legend (Completed=green, On-going=red)
+                raw_status = str(m_row.get("status", "")).strip().lower()
+
+                status_js = "unknown"
+                if "complete" in raw_status:
+                    status_js = "completed"
+                elif "on-going" in raw_status or "ongoing" in raw_status:
+                    status_js = "on-going"
+
+                if status_js == "completed":
+                    color = "#2ecc71"   # green
+                elif status_js == "on-going":
+                    color = "#e74c3c"   # red
+                else:
+                    color = "#7f8c8d"   # gray for unknown
+
+                # Line style shows processing method: solid = automatic, dashed = manual
+                dash_array = "8,6" if proc_type == "manual" else None
+
+                def _centerline_style(_feature, color=color, dash_array=dash_array):
+                    style = {"color": color, "weight": 3.0, "opacity": 0.95}
+                    if dash_array:
+                        style["dashArray"] = dash_array
+                    return style
 
                 mj = folium.GeoJson(
                     m_row.geometry,
                     name=m_layer_name,
-                    tooltip=f"Centerline ({proc_type.title()}): {raw_fmr or 'N/A'}",
-                    style_function=lambda feature, color=color: {
-                        "color": color,
-                        "weight": 3.0,
-                    },
+                    tooltip=f"Centerline ({proc_type.title()}, {status_js.replace('-', ' ').title()}): {raw_fmr or 'N/A'}",
+                    style_function=_centerline_style,
                 )
+
                 mj.add_to(fmap)
                 mj_js_var = mj.get_name()
 
@@ -1666,6 +1740,48 @@ def create_fmr_map(input_gdf=None):
         </div>
     """
 
+    # --- Province filter JS (fixes "filter_by_province is not defined") ---
+    js_ui += """
+    <script>
+      (function () {
+        // restore last selection after reload (optional, but helps UX)
+        document.addEventListener('DOMContentLoaded', function () {
+          const sel = document.getElementById('provinceSelect');
+          const last = localStorage.getItem('selectedProvince');
+          if (sel && last) sel.value = last;
+        });
+
+        // must be global because HTML calls it directly
+        window.filter_by_province = function () {
+          const sel = document.getElementById('provinceSelect');
+          if (!sel) {
+            console.warn('[province filter] #provinceSelect not found');
+            return;
+          }
+
+          const province = sel.value || 'All';
+          localStorage.setItem('selectedProvince', province);
+
+          fetch('/filter_by_province', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ province: province })
+          })
+          .then(r => r.json())
+          .then(data => {
+            if (data && data.status === 'filtered') {
+              // IMPORTANT: backend regenerates the map HTML, so reload to show it
+              window.location.href = '/';
+            } else {
+              console.error('[province filter] unexpected response:', data);
+            }
+          })
+          .catch(err => console.error('[province filter] failed:', err));
+        };
+      })();
+    </script>
+    """
+
     fmap.get_root().html.add_child(folium.Element(js_ui))
 
     # 11/23: expose the Leaflet map instance as window._map so filters & overlays can work
@@ -1700,6 +1816,100 @@ def create_fmr_map(input_gdf=None):
         </script>
     """))
 
+    # 01/12/2026: NEW - pan to selected FMR when Manual Processing dropdown changes
+    fmap.get_root().html.add_child(folium.Element(r"""
+    <script>
+    (function () {
+    function getGeoLayers() {
+        // geoLayers is used by your injected geo_layer_script; this keeps compatibility either way
+        if (typeof geoLayers !== "undefined") return geoLayers;
+        if (window.geoLayers) return window.geoLayers;
+        return null;
+    }
+
+    function normalizeFmrId(val) {
+        if (val === null || val === undefined) return null;
+        var s = String(val).trim();
+        if (!s) return null;
+
+        // supports values like "12", "FMR-12", "FMR_12", etc.
+        var m = s.match(/(\d+)/);
+        return m ? m[1] : null;
+    }
+
+    function panToFmrId(rawVal) {
+        var fid = normalizeFmrId(rawVal);
+        if (!fid) return;
+
+        var tries = 0;
+        function attempt() {
+        var map = window._map;
+        var layers = getGeoLayers();
+        var layer = layers && layers["geoLayer_" + fid];
+
+        if (map && layer && typeof layer.getBounds === "function") {
+            var b = layer.getBounds();
+            if (b && typeof b.isValid === "function" && b.isValid()) {
+            map.fitBounds(b, { padding: [25, 25] });
+            } else {
+            map.fitBounds(b);
+            }
+            return;
+        }
+
+        tries += 1;
+        if (tries <= 25) setTimeout(attempt, 100);
+        }
+        attempt();
+    }
+
+    // optional: expose for debugging
+    window.panToManualFMR = panToFmrId;
+
+    // 1) Pan when user changes the dropdown
+    document.addEventListener("change", function (e) {
+        var el = e.target;
+        if (!el) return;
+
+        if (!el.closest || !el.closest("#manual-fmr-container")) return;
+        if ((el.tagName || "").toLowerCase() !== "select") return;
+
+        panToFmrId(el.value);
+    }, true);
+
+    // 2) Also pan immediately when a new Manual row is added (so user sees it even if they don't change the default)
+    function attachObserver() {
+        var container = document.getElementById("manual-fmr-container");
+        if (!container) return;
+
+        var obs = new MutationObserver(function (mutations) {
+        mutations.forEach(function (mu) {
+            (mu.addedNodes || []).forEach(function (node) {
+            if (!node) return;
+
+            // node might be the row wrapper; find the select inside it
+            var sel = null;
+            if (node.tagName && String(node.tagName).toLowerCase() === "select") sel = node;
+            else if (node.querySelector) sel = node.querySelector("select");
+
+            if (sel && sel.value) panToFmrId(sel.value);
+            });
+        });
+        });
+
+        obs.observe(container, { childList: true, subtree: true });
+    }
+
+    // run after page is ready
+    if (document.readyState === "loading") {
+        document.addEventListener("DOMContentLoaded", attachObserver);
+    } else {
+        attachObserver();
+    }
+    })();
+    </script>
+    """))
+
     #11/23: Status legend panel under Database Status (Completed / On-going)
     fmap.get_root().html.add_child(folium.Element("""
         <script>
@@ -1719,15 +1929,30 @@ def create_fmr_map(input_gdf=None):
 
                 lg.innerHTML =
                     '<div style="font-weight:bold;margin-bottom:6px;">Legend</div>' +
+
                     '<div style="display:flex;align-items:center;gap:6px;margin-bottom:4px;">' +
                         '<span style="display:inline-block;width:10px;height:10px;border-radius:50%;' +
-                               'background:#2ecc71;margin-right:4px;"></span>' +
+                            'background:#2ecc71;margin-right:4px;"></span>' +
                         '<span>Completed</span>' +
                     '</div>' +
-                    '<div style="display:flex;align-items:center;gap:6px;">' +
+
+                    '<div style="display:flex;align-items:center;gap:6px;margin-bottom:4px;">' +
                         '<span style="display:inline-block;width:10px;height:10px;border-radius:50%;' +
-                               'background:#e74c3c;margin-right:4px;"></span>' +
+                            'background:#e74c3c;margin-right:4px;"></span>' +
                         '<span>On-going</span>' +
+                    '</div>' +
+
+                    '<hr style="margin:6px 0;border:0;border-top:1px solid #ddd;">' +
+                    '<div style="font-weight:bold;margin-bottom:6px;">Processing method</div>' +
+
+                    '<div style="display:flex;align-items:center;gap:6px;margin-bottom:4px;">' +
+                        '<span style="display:inline-block;width:22px;height:0;border-top:3px solid #444;"></span>' +
+                        '<span>Automatic (solid line)</span>' +
+                    '</div>' +
+
+                    '<div style="display:flex;align-items:center;gap:6px;">' +
+                        '<span style="display:inline-block;width:22px;height:0;border-top:3px dashed #444;"></span>' +
+                        '<span>Manual (dashed line)</span>' +
                     '</div>';
 
                 document.body.appendChild(lg);
@@ -1844,7 +2069,7 @@ def full_rebuild():
 @app.route('/get_update_stats', methods=['GET'])
 def get_update_stats():
     """Get statistics about the database"""
-    fmr_db_file = os.path.join(os.path.dirname(shapefile_path), "fmr_database_migo.csv")
+    fmr_db_file = os.path.join(os.path.dirname(shapefile_path), "fmr_database.csv")
     
     stats = {
         'total_fmrs': len(gdf) if 'gdf' in globals() else 0,
@@ -1888,7 +2113,7 @@ class FMRMainWindow(QMainWindow):
 
     def init_ui(self):
         """Initialize the user interface"""
-        self.setWindowTitle("FMR Processing GUI - Optimized Version")
+        self.setWindowTitle("FMR Monitoring Application")
         self.setGeometry(100, 100, 1200, 800)
         
         # Create central widget and layout
@@ -1979,7 +2204,7 @@ def main():
         return
     
     # Check if database exists
-    fmr_db_file = os.path.join(os.path.dirname(shapefile_path), "fmr_database_migo.csv")
+    fmr_db_file = os.path.join(os.path.dirname(shapefile_path), "fmr_database.csv")
     if os.path.exists(fmr_db_file):
         try:
             df = pd.read_csv(fmr_db_file)
